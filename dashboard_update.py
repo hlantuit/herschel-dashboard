@@ -34,12 +34,89 @@ def heading(text, level=2):
     return {"object": "block", "type": tag, tag: {"rich_text": [{"type": "text", "text": {"content": text}}]}}
  
  
-def paragraph(text):
-    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
- 
  
 def divider():
     return {"object": "block", "type": "divider", "divider": {}}
+ 
+ 
+def _line_to_segments(line):
+    """
+    Converts one line specification into a list of rich_text segments
+    (no trailing newline added here — that's handled by the caller).
+ 
+    A line can be:
+      - a plain string: rendered as-is, no bolding.
+      - a (label, value) tuple: label in normal text, value in bold.
+      - a list of strings/tuples: each rendered in sequence on the same
+        line, mixing plain and bold segments freely. Use this when a
+        single line has several distinct values, e.g. a forecast day with
+        a temperature range AND a wind speed on one line.
+    """
+    if isinstance(line, list):
+        segments = []
+        for piece in line:
+            segments.extend(_line_to_segments(piece))
+        return segments
+ 
+    if isinstance(line, tuple):
+        label, value = line
+        segments = []
+        if label:
+            segments.append({"type": "text", "text": {"content": label}})
+        segments.append({
+            "type": "text",
+            "text": {"content": str(value)},
+            "annotations": {"bold": True},
+        })
+        return segments
+ 
+    return [{"type": "text", "text": {"content": line}}]
+ 
+ 
+def build_bolded_lines(lines):
+    """
+    Builds a single rich_text array from a list of lines (see
+    _line_to_segments for what a line can be). Lines are separated by a
+    newline appended to the end of the last segment of the previous line,
+    rather than as a standalone segment, since a lone "\\n"-only text
+    object with no preceding content can be dropped by Notion in practice.
+    """
+    segments = []
+    for i, line in enumerate(lines):
+        if i > 0 and segments:
+            segments[-1]["text"]["content"] += "\n"
+        segments.extend(_line_to_segments(line))
+    return segments
+ 
+ 
+def callout(lines, emoji="📌", color="gray_background"):
+    """
+    Builds a callout block from a list of lines (see build_bolded_lines).
+    Accepts either a plain string (backward compatible, no bolding) or a
+    list of strings/tuples/mixed-segment-lists for selective bolding.
+    """
+    if isinstance(lines, str):
+        lines = [lines]
+    return {
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "rich_text": build_bolded_lines(lines),
+            "icon": {"type": "emoji", "emoji": emoji},
+            "color": color,
+        },
+    }
+ 
+ 
+def paragraph(lines):
+    """
+    Builds a paragraph block from a list of lines (see build_bolded_lines).
+    Accepts either a plain string (backward compatible) or a list for
+    selective bolding.
+    """
+    if isinstance(lines, str):
+        lines = [lines]
+    return {"object": "block", "paragraph": {"rich_text": build_bolded_lines(lines)}, "type": "paragraph"}
  
  
 def callout(text, emoji="📌", color="gray_background"):
@@ -200,14 +277,14 @@ weather = get_weather()
 if weather["status"] == "ok":
     compass = degrees_to_compass(weather["winddirection_deg"])
     wind_dir_text = f"{compass} ({weather['winddirection_deg']:.0f}°)" if compass else "—"
-    weather_text = (
-        f"Air temperature: {weather['temperature_c']} °C\n"
-        f"Wind speed: {weather['windspeed_kmh']} km/h\n"
-        f"Wind direction: {wind_dir_text}\n"
-        f"Humidity: {weather['humidity_pct']} %\n"
-        f"Pressure: {weather['pressure_hpa']} hPa\n"
-        f"Source: Open-Meteo (ERA5-based forecast/analysis)"
-    )
+    weather_text = [
+        ("Air temperature: ", f"{weather['temperature_c']} °C"),
+        ("Wind speed: ", f"{weather['windspeed_kmh']} km/h"),
+        ("Wind direction: ", wind_dir_text),
+        ("Humidity: ", f"{weather['humidity_pct']} %"),
+        ("Pressure: ", f"{weather['pressure_hpa']} hPa"),
+        "Source: Open-Meteo (ERA5-based forecast/analysis)",
+    ]
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
  
@@ -256,12 +333,17 @@ if land_forecast_days:
     for d in land_forecast_days:
         day_label = datetime.strptime(d["date"], "%Y-%m-%d").strftime("%a %b %d")
         compass = degrees_to_compass(d["wind_dir_deg"])
-        lines.append(
-            f"{day_label}: {d['temp_min']:.0f}–{d['temp_max']:.0f} °C, "
-            f"wind up to {d['wind_max_kmh']:.0f} km/h {compass or ''}, "
-            f"precip {d['precip_mm']:.1f} mm"
-        )
-    land_forecast_text = "\n".join(lines) + "\nSource: Open-Meteo"
+        # Each day is ONE line containing multiple bold value segments
+        # mixed with plain connecting text (commas, "wind up to", etc).
+        lines.append([
+            f"{day_label}: ",
+            ("", f"{d['temp_min']:.0f}–{d['temp_max']:.0f} °C"),
+            ", wind up to ",
+            ("", f"{d['wind_max_kmh']:.0f} km/h {compass or ''}".strip()),
+            ", precip ",
+            ("", f"{d['precip_mm']:.1f} mm"),
+        ])
+    land_forecast_text = lines + ["Source: Open-Meteo"]
 else:
     land_forecast_text = "Land forecast unavailable — fetch failed. Check Action logs."
  
@@ -303,13 +385,20 @@ marine_entries = get_marine_forecast()
 if marine_entries:
     # The feed mixes forecast periods with warnings/synopsis entries; show
     # the first several as-is, since titles already summarize each one
-    # (e.g. "Wind", "Waves", "Extended Forecast", "Ice Forecast").
+    # (e.g. "Wind", "Waves", "Extended Forecast", "Ice Forecast"). We bold
+    # the section title (a clean label) but leave the forecaster's
+    # free-form prose unbolded — there's no single "value" to highlight in
+    # a sentence like "Wind light becoming southeast 15 knots", and trying
+    # to extract just the number would risk mangling the wording.
     lines = []
     for e in marine_entries[:6]:
         title = e["title"].strip()
         summary = e["summary"].strip() if e["summary"] else ""
-        lines.append(f"{title}: {summary}" if summary and summary != title else title)
-    marine_text = "\n\n".join(lines) + "\n\nSource: Environment Canada (Yukon Coast marine zone)"
+        if summary and summary != title:
+            lines.append([("", title), ": ", summary])
+        else:
+            lines.append(title)
+    marine_text = lines + ["Source: Environment Canada (Yukon Coast marine zone)"]
 else:
     marine_text = "Marine forecast unavailable — fetch failed. Check Action logs."
  
@@ -360,24 +449,24 @@ if sun_info["status"] == "ok":
     minutes = int((day_length_s % 3600) // 60)
  
     if day_length_s >= 23 * 3600 + 30 * 60:
-        sun_text = (
-            f"Day length: ~{hours}h {minutes}min — consistent with continuous "
-            f"daylight (midnight sun) at this latitude.\n"
-            f"Source: sunrise-sunset.org"
-        )
+        sun_text = [
+            ("Day length: ", f"~{hours}h {minutes}min"),
+            "Consistent with continuous daylight (midnight sun) at this latitude.",
+            "Source: sunrise-sunset.org",
+        ]
     elif day_length_s <= 30 * 60:
-        sun_text = (
-            f"Day length: ~{hours}h {minutes}min — consistent with polar night "
-            f"at this latitude.\n"
-            f"Source: sunrise-sunset.org"
-        )
+        sun_text = [
+            ("Day length: ", f"~{hours}h {minutes}min"),
+            "Consistent with polar night at this latitude.",
+            "Source: sunrise-sunset.org",
+        ]
     else:
-        sun_text = (
-            f"Sunrise (UTC): {sun_info['sunrise'].strftime('%H:%M')}\n"
-            f"Sunset (UTC): {sun_info['sunset'].strftime('%H:%M')}\n"
-            f"Day length: {hours}h {minutes}min\n"
-            f"Source: sunrise-sunset.org"
-        )
+        sun_text = [
+            ("Sunrise (UTC): ", sun_info['sunrise'].strftime('%H:%M')),
+            ("Sunset (UTC): ", sun_info['sunset'].strftime('%H:%M')),
+            ("Day length: ", f"{hours}h {minutes}min"),
+            "Source: sunrise-sunset.org",
+        ]
 elif sun_info["status"] == "no_data":
     sun_text = f"Sun data unavailable ({sun_info.get('raw_status')}) — may be a polar-day/polar-night edge case the API can't resolve at this latitude."
 else:
@@ -608,12 +697,12 @@ if tide_points:
     next_max = max(levels) if levels else None
     next_min = min(levels) if levels else None
  
-    tide_text = (
-        f"Predicted water level (now): {current_level:.2f} m\n"
-        f"Next 24h range: {next_min:.2f} m to {next_max:.2f} m\n"
-        f"Reference: chart datum, Herschel Island station (06525)\n"
-        f"Source: DFO/CHS Integrated Water Level System (IWLS)"
-    )
+    tide_text = [
+        ("Predicted water level (now): ", f"{current_level:.2f} m"),
+        ["Next 24h range: ", ("", f"{next_min:.2f} m"), " to ", ("", f"{next_max:.2f} m")],
+        "Reference: chart datum, Herschel Island station (06525)",
+        "Source: DFO/CHS Integrated Water Level System (IWLS)",
+    ]
 else:
     tide_text = (
         "Tide prediction data unavailable for Herschel Island station (06525).\n"
