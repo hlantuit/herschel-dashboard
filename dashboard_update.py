@@ -740,7 +740,6 @@ if temp_chart_bytes:
 # ASSEMBLE DASHBOARD BLOCKS
 # =========================================================
 blocks = [
-    heading("Herschel Island Environmental Dashboard", level=1),
     paragraph(f"Last update (UTC): {now.strftime('%Y-%m-%d %H:%M')}"),
     divider(),
  
@@ -825,4 +824,3 @@ print("Dashboard updated successfully")
 #   netCDF4
 #   notion-client
 #   requests
- 
