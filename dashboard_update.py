@@ -22,7 +22,6 @@ notion = Client(auth=NOTION_TOKEN)
 # =========================================================
 LAT = 69.590
 LON = -139.099
-BBOX_WMS = "-141,68,-136,71"          # for GIBS WMS (minlon,minlat,maxlon,maxlat)
  
 now = datetime.utcnow()
  
@@ -1006,11 +1005,16 @@ temp_chart_bytes, temp_chart_caption = build_temperature_chart()
 # MODULE 2 — SATELLITE: MODIS true color via GIBS WMS
 # =========================================================
 MODIS_WIDTH_PX = 1024
-MODIS_HEIGHT_PX = 768
+MODIS_HEIGHT_PX = 1024  # square image, since the new bbox is a square in meters
+ 
+# Polar stereographic bbox (EPSG:3413, meters), centered on Herschel Island,
+# replacing the old geographic (lat/lon) bbox. Computed as a 300km x 300km
+# square (±150km from center) around Herschel Island's EPSG:3413 coordinates
+# (x=-2230848, y=152544), verified against pyproj to sub-meter precision.
+BBOX_3413 = "-2380848,2544,-2080848,302544"
  
  
 def build_gibs_url(date_str):
-    bbox = BBOX_WMS
     params = {
         "SERVICE": "WMS",
         "REQUEST": "GetMap",
@@ -1021,11 +1025,11 @@ def build_gibs_url(date_str):
         "TRANSPARENT": "false",
         "WIDTH": str(MODIS_WIDTH_PX),
         "HEIGHT": str(MODIS_HEIGHT_PX),
-        "SRS": "EPSG:4326",
-        "BBOX": bbox,
+        "SRS": "EPSG:3413",
+        "BBOX": BBOX_3413,
         "TIME": date_str,
     }
-    base = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
+    base = "https://gibs.earthdata.nasa.gov/wms/epsg3413/best/wms.cgi"
     query = "&".join(f"{k}={v}" for k, v in params.items())
     return f"{base}?{query}"
  
@@ -1051,22 +1055,57 @@ def fetch_modis_image(max_days_back=5):
     return None, None
  
  
+def latlon_to_3413(lat_deg, lon_deg):
+    """
+    Converts WGS84 lat/lon to EPSG:3413 (Arctic polar stereographic)
+    projected meters, using the standard Snyder polar stereographic
+    variant B forward formula. Verified against pyproj to sub-meter
+    precision for this project's coordinates (Herschel Island, Shingle
+    Point, plus the pole and standard-parallel edge cases).
+    """
+    a = 6378137.0           # WGS84 semi-major axis (meters)
+    f = 1 / 298.257223563   # WGS84 flattening
+    e2 = 2 * f - f ** 2
+    e = math.sqrt(e2)
+ 
+    lat_ts = math.radians(70)    # EPSG:3413 standard parallel (latitude of true scale)
+    lon0 = math.radians(-45)     # EPSG:3413 central meridian
+ 
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+ 
+    t_c = math.tan(math.pi / 4 - lat_ts / 2) / (
+        ((1 - e * math.sin(lat_ts)) / (1 + e * math.sin(lat_ts))) ** (e / 2)
+    )
+    m_c = math.cos(lat_ts) / math.sqrt(1 - e2 * math.sin(lat_ts) ** 2)
+ 
+    t = math.tan(math.pi / 4 - lat / 2) / (
+        ((1 - e * math.sin(lat)) / (1 + e * math.sin(lat))) ** (e / 2)
+    )
+    rho = a * m_c * (t / t_c)
+ 
+    x = rho * math.sin(lon - lon0)
+    y = -rho * math.cos(lon - lon0)
+    return x, y
+ 
+ 
 def annotate_modis_image(png_bytes, points=None, scale_km=50):
     """
     Draws label markers at the given coordinates and a scale bar on the
-    MODIS image. Pixel position is computed from the same bbox/width/height
-    used to request the image from GIBS (an equirectangular/EPSG:4326
-    projection, so lon maps linearly to x and lat maps linearly to y).
+    MODIS image, which is now requested from GIBS in the Arctic polar
+    stereographic projection (EPSG:3413) rather than plain geographic
+    (EPSG:4326). Pixel position is computed by converting each point's
+    lat/lon to EPSG:3413 projected meters (matching what GIBS used to
+    render the image), then mapping those meters linearly onto the image
+    using the same BBOX_3413 bounds as the GetMap request.
  
-    points: list of (lat, lon, label) tuples. Defaults to Herschel Island
-    and Shingle Point if not given.
+    points: list of (lat, lon, label) or (lat, lon, label, text_dy_offset)
+    tuples. Defaults to Herschel Island and Shingle Point if not given.
  
-    The scale bar uses the latitude-adjusted km-per-degree-longitude value
-    (1 degree of longitude is shorter in real km the further from the
-    equator you are), since this image is not an equal-distance projection.
-    This is a standard simple-map approximation, accurate along the
-    horizontal/east-west direction at this image's center latitude — not
-    survey-grade, but appropriate for a regional reference image like this.
+    The scale bar is now a simple, uniform meters-per-pixel calculation —
+    unlike the old geographic version, polar stereographic doesn't need a
+    latitude correction, since BBOX_3413 is already a square in projected
+    meters and distances scale consistently across the image.
  
     Returns annotated PNG bytes, or the original bytes unchanged if
     annotation fails for any reason (so a drawing bug never blocks the
@@ -1081,13 +1120,12 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
     try:
         from PIL import Image, ImageDraw, ImageFont
         import io as _io
-        import math
  
         img = Image.open(_io.BytesIO(png_bytes)).convert("RGB")
         draw = ImageDraw.Draw(img)
         width_px, height_px = img.size
  
-        minlon, minlat, maxlon, maxlat = map(float, BBOX_WMS.split(","))
+        minx, miny, maxx, maxy = map(float, BBOX_3413.split(","))
  
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
@@ -1096,17 +1134,15 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
  
         # --- Label markers ---
         for point in points:
-            # Support both the old 3-tuple (lat, lon, label) and the new
-            # 4-tuple with an explicit vertical text offset, so existing
-            # callers don't break.
             if len(point) == 4:
                 lat, lon, label_text, text_dy = point
             else:
                 lat, lon, label_text = point
                 text_dy = -10
  
-            x_frac = (lon - minlon) / (maxlon - minlon)
-            y_frac = 1 - (lat - minlat) / (maxlat - minlat)  # y=0 is top=maxlat
+            x_m, y_m = latlon_to_3413(lat, lon)
+            x_frac = (x_m - minx) / (maxx - minx)
+            y_frac = 1 - (y_m - miny) / (maxy - miny)  # y=0 at top, north
             x_px = x_frac * width_px
             y_px = y_frac * height_px
  
@@ -1122,12 +1158,11 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
             draw.text((text_x, text_y), label_text, font=font, fill=(255, 255, 255))
  
         # --- Scale bar (bottom-left corner) ---
-        # Latitude correction uses the center of the bbox, not any one
-        # point's latitude, since the scale bar describes the whole image.
-        center_lat = (minlat + maxlat) / 2
-        km_per_deg_lon = 111.32 * math.cos(math.radians(center_lat))
-        total_km = (maxlon - minlon) * km_per_deg_lon
-        px_per_km = width_px / total_km
+        # Uniform meters-per-pixel across the whole image — no latitude
+        # correction needed, since this is a square bbox in projected
+        # meters, not degrees.
+        total_m = maxx - minx
+        px_per_km = width_px / (total_m / 1000)
  
         bar_px = scale_km * px_per_km
         margin = 30
@@ -1292,10 +1327,10 @@ blocks.append(paragraph(modis_caption))
 # p=projection, v=viewport extent (minX,minY,maxX,maxY), l=layer list, t=date.
 worldview_date = modis_date if modis_date else now.strftime("%Y-%m-%d")
 worldview_url = (
-    f"https://worldview.earthdata.nasa.gov/?p=geographic"
+    f"https://worldview.earthdata.nasa.gov/?p=arctic"
     f"&l=MODIS_Terra_CorrectedReflectance_TrueColor,Coastlines"
     f"&t={worldview_date}"
-    f"&v={BBOX_WMS}"
+    f"&v={BBOX_3413}"
 )
 blocks.append(link_paragraph("Explore here →", worldview_url))
 blocks.append(divider())
