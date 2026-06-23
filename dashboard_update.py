@@ -1,6 +1,7 @@
 
 import os
 import io
+import math
 import requests
 from datetime import datetime, timedelta, date, timezone
 from notion_client import Client
@@ -249,6 +250,7 @@ def get_weather():
             "temperature_c": cw.get("temperature"),
             "windspeed_kmh": cw.get("windspeed"),
             "winddirection_deg": cw.get("winddirection"),
+            "weathercode": cw.get("weathercode"),
             "humidity_pct": humidity,
             "pressure_hpa": pressure,
             "status": "ok",
@@ -259,6 +261,7 @@ def get_weather():
             "temperature_c": None,
             "windspeed_kmh": None,
             "winddirection_deg": None,
+            "weathercode": None,
             "humidity_pct": None,
             "pressure_hpa": None,
             "status": "missing",
@@ -280,6 +283,135 @@ if weather["status"] == "ok":
     ]
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
+ 
+ 
+# =========================================================
+# MODULE 1a-1b — WEATHER PICTOGRAM
+# Draws a simple icon matching the current WMO weathercode (returned by
+# Open-Meteo's current_weather) rather than depending on an external icon
+# server staying available — same reasoning as the MODIS image annotation:
+# self-contained drawing is more robust than a third-party image URL.
+#
+# WMO weathercode reference (subset relevant to Arctic conditions):
+# 0-1: clear/mainly clear, 2: partly cloudy, 3: cloudy, 45/48: fog,
+# 51-57: drizzle, 61-67: rain, 71-77: snow, 80-82: showers,
+# 85-86: snow showers, 95-99: thunderstorm
+# =========================================================
+NOTION_ICON_YELLOW = (231, 179, 71)
+NOTION_ICON_GRAY = (155, 154, 151)
+NOTION_ICON_DARK_GRAY = (120, 119, 116)
+NOTION_ICON_BLUE = (51, 126, 169)
+NOTION_ICON_LIGHT_GRAY = (227, 226, 224)
+NOTION_ICON_WHITE = (255, 255, 255)
+ 
+ 
+def _icon_draw_sun(draw, cx, cy, r=18, color=None):
+    color = color or NOTION_ICON_YELLOW
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
+    for i in range(8):
+        angle = i * math.pi / 4
+        x1 = cx + math.cos(angle) * (r + 4)
+        y1 = cy + math.sin(angle) * (r + 4)
+        x2 = cx + math.cos(angle) * (r + 11)
+        y2 = cy + math.sin(angle) * (r + 11)
+        draw.line([(x1, y1), (x2, y2)], fill=color, width=4)
+ 
+ 
+def _icon_draw_cloud(draw, cx, cy, scale=1.0, color=None):
+    color = color or NOTION_ICON_LIGHT_GRAY
+    r = 16 * scale
+    bumps = [(-1.5, 0.1, 0.85), (-0.6, -0.5, 1.0), (0.4, -0.4, 1.05),
+             (1.3, 0.1, 0.8), (-0.9, 0.35, 0.9), (0.9, 0.35, 0.9)]
+    for dx, dy, s in bumps:
+        rr = r * s
+        draw.ellipse([cx + dx * r - rr, cy + dy * r - rr, cx + dx * r + rr, cy + dy * r + rr], fill=color)
+ 
+ 
+def _icon_partly_cloudy(draw, cx, cy):
+    _icon_draw_sun(draw, cx - 10, cy - 10, r=13)
+    _icon_draw_cloud(draw, cx + 8, cy + 6, scale=0.85)
+ 
+ 
+def _icon_rain(draw, cx, cy, heavy=False):
+    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_DARK_GRAY if heavy else NOTION_ICON_GRAY)
+    offsets = [-18, -6, 6, 18] if heavy else [-14, 0, 14]
+    for dx in offsets:
+        draw.line([(cx + dx, cy + 22), (cx + dx - 4, cy + 36)], fill=NOTION_ICON_BLUE, width=3)
+ 
+ 
+def _icon_snow(draw, cx, cy):
+    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_LIGHT_GRAY)
+    for dx in [-14, 0, 14]:
+        for dy in [26, 38]:
+            r = 2.5
+            draw.ellipse([cx + dx - r, cy + dy - r, cx + dx + r, cy + dy + r],
+                         fill=NOTION_ICON_WHITE, outline=NOTION_ICON_GRAY, width=1)
+ 
+ 
+def _icon_fog(draw, cx, cy):
+    for i, dy in enumerate([-10, 2, 14, 26]):
+        w = 28 - i * 1.5
+        draw.line([(cx - w, cy + dy), (cx + w, cy + dy)], fill=NOTION_ICON_GRAY, width=4)
+ 
+ 
+def _icon_thunder(draw, cx, cy):
+    _icon_draw_cloud(draw, cx, cy, color=NOTION_ICON_DARK_GRAY)
+    pts = [(cx - 4, cy + 18), (cx + 6, cy + 18), (cx - 2, cy + 34), (cx + 8, cy + 34), (cx - 6, cy + 50)]
+    draw.line(pts, fill=NOTION_ICON_YELLOW, width=3, joint="curve")
+ 
+ 
+def render_weather_icon(weathercode):
+    """
+    Renders a small PNG icon matching the given WMO weathercode.
+    Returns PNG bytes, or None if rendering fails for any reason (so a
+    drawing bug never blocks the rest of the dashboard from updating).
+    """
+    try:
+        from PIL import Image, ImageDraw
+        import io as _io
+ 
+        size = 100
+        img = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(img)
+        cx, cy = size // 2, size // 2 - 5
+ 
+        code = weathercode if weathercode is not None else -1
+ 
+        if code in (0, 1):
+            _icon_draw_sun(draw, cx, cy)
+        elif code == 2:
+            _icon_partly_cloudy(draw, cx, cy)
+        elif code == 3:
+            _icon_draw_cloud(draw, cx, cy)
+        elif code in (45, 48):
+            _icon_fog(draw, cx, cy)
+        elif code in (51, 53, 55, 56, 57):
+            _icon_rain(draw, cx, cy, heavy=False)
+        elif code in (61, 63, 65, 66, 67):
+            _icon_rain(draw, cx, cy, heavy=(code in (65, 67)))
+        elif code in (71, 73, 75, 77):
+            _icon_snow(draw, cx, cy)
+        elif code in (80, 81, 82):
+            _icon_rain(draw, cx, cy, heavy=(code == 82))
+        elif code in (85, 86):
+            _icon_snow(draw, cx, cy)
+        elif code in (95, 96, 99):
+            _icon_thunder(draw, cx, cy)
+        else:
+            # Unrecognized code: fall back to a plain cloud rather than
+            # guessing, since an unknown code shouldn't be shown as sunny.
+            _icon_draw_cloud(draw, cx, cy)
+ 
+        out_buf = _io.BytesIO()
+        img.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+ 
+    except Exception as e:
+        print("WEATHER ICON RENDER FAILED:", e)
+        return None
+ 
+ 
+weather_icon_bytes = render_weather_icon(weather.get("weathercode")) if weather["status"] == "ok" else None
  
  
 # =========================================================
@@ -556,22 +688,58 @@ def build_temperature_chart():
     if min_years_used < 15:
         print("TEMP CHART: WARNING — fewer than 15 years of data available for the normal, treat with caution")
  
-    # Render chart
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    # Render chart — styled to read more like a clean Notion-native graphic
+    # than a default matplotlib plot: no box border, light horizontal-only
+    # gridlines, soft shaded band for the historical normal (instead of a
+    # second competing line), and a muted, Notion-like color palette.
+    NOTION_TEXT_GRAY = "#787774"
+    NOTION_BLUE = "#337EA9"
+    NOTION_RED = "#E16259"
+    NOTION_LIGHT_GRID = "#EDECEC"
+ 
+    plt.rcParams["font.family"] = "DejaVu Sans"
+ 
+    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=150)
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
+ 
     x_labels = [datetime.strptime(d, "%Y-%m-%d").strftime("%b %d") for d in day_labels]
+    x = range(len(day_labels))
  
-    ax.plot(x_labels, recent_values, marker="o", linewidth=2, label=f"{current_year} observed", color="#c0392b")
-    ax.plot(x_labels, normal_values, marker="o", linewidth=2, linestyle="--", label="1996-2025 average", color="#7f8c8d")
+    # Shaded band: from the lowest to the highest observed normal across the
+    # window, giving a sense of "typical range" rather than a single line
+    # competing visually with the current-year line.
+    ax.fill_between(x, [v - 1.5 if v is not None else math.nan for v in normal_values],
+                     [v + 1.5 if v is not None else math.nan for v in normal_values],
+                     color=NOTION_BLUE, alpha=0.10, linewidth=0, zorder=1)
+    ax.plot(x, normal_values, linewidth=1.5, color=NOTION_BLUE, alpha=0.55,
+             label="1996–2025 average", zorder=2)
  
-    ax.set_ylabel("Mean daily temperature (°C)")
-    ax.set_title("Herschel Island — last 10 days vs. 30-year average")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    plt.xticks(rotation=45, ha="right")
+    ax.plot(x, recent_values, marker="o", markersize=5, linewidth=2.5,
+             color=NOTION_RED, label=f"{current_year} observed",
+             markerfacecolor="white", markeredgewidth=1.5, markeredgecolor=NOTION_RED, zorder=3)
+ 
+    # Remove chart border entirely except a faint baseline
+    for spine in ["top", "right", "left"]:
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color(NOTION_LIGHT_GRID)
+ 
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(x_labels, fontsize=10, color=NOTION_TEXT_GRAY)
+    ax.tick_params(axis="y", labelsize=10, colors=NOTION_TEXT_GRAY, length=0)
+    ax.tick_params(axis="x", length=0)
+ 
+    ax.yaxis.grid(True, color=NOTION_LIGHT_GRID, linewidth=1, zorder=0)
+    ax.xaxis.grid(False)
+    ax.set_axisbelow(True)
+ 
+    ax.set_ylabel("°C", fontsize=10, color=NOTION_TEXT_GRAY)
+    legend = ax.legend(loc="upper left", frameon=False, fontsize=10, labelcolor=NOTION_TEXT_GRAY)
+ 
     fig.tight_layout()
  
     png_bytes = fig_to_png_bytes(fig)
-    caption = f"Daily mean temperature, last 10 days vs. 30-year (1996-2025) average. Normal computed from {min_years_used}-{max(years_used_counts)} years of ERA5 data per calendar day."
+    caption = f"Daily mean temperature, last 10 days vs. 30-year (1996-2025) average (shaded band ±1.5°C). Normal computed from {min_years_used}-{max(years_used_counts)} years of ERA5 data per calendar day."
     return png_bytes, caption
  
  
@@ -823,6 +991,14 @@ if temp_chart_bytes:
         print("TEMP CHART NOTION UPLOAD FAILED:", e)
         temp_chart_caption = "Chart generated but upload to Notion failed — see Action logs."
  
+weather_icon_block = None
+if weather_icon_bytes:
+    try:
+        uid = upload_image_to_notion(weather_icon_bytes, "weather_icon.png")
+        weather_icon_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("WEATHER ICON NOTION UPLOAD FAILED:", e)
+ 
  
 # =========================================================
 # ASSEMBLE DASHBOARD BLOCKS
@@ -841,8 +1017,11 @@ blocks.append(divider())
 # --- Row 1: current conditions (weather) + sun, side by side ---
 weather_column = [
     heading("🌡 Weather", level=3),
-    callout(weather_text, emoji="🌡", color="blue_background"),
 ]
+if weather_icon_block:
+    weather_column.append(weather_icon_block)
+weather_column.append(callout(weather_text, emoji="🌡", color="blue_background"))
+ 
 sun_column = [
     heading("☀️ Sunrise / Sunset", level=3),
     callout(sun_text, emoji="☀️", color="yellow_background"),
