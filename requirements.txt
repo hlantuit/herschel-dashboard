@@ -1,6 +1,4 @@
 notion-client
 requests
-xarray
-netCDF4
 matplotlib
  
