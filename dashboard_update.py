@@ -1,3 +1,4 @@
+
 import os
 import io
 import requests
@@ -95,6 +96,16 @@ def fig_to_png_bytes(fig):
 # MODULE 1 — WEATHER (temperature, wind, humidity, pressure)
 # Source: Open-Meteo current_weather + hourly (free, no key needed)
 # =========================================================
+def degrees_to_compass(deg):
+    """Converts wind direction in degrees to a 16-point compass label."""
+    if deg is None:
+        return None
+    directions = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                  "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    idx = round(deg / 22.5) % 16
+    return directions[idx]
+ 
+ 
 def get_weather():
     try:
         url = "https://api.open-meteo.com/v1/forecast"
@@ -125,6 +136,7 @@ def get_weather():
         return {
             "temperature_c": cw.get("temperature"),
             "windspeed_kmh": cw.get("windspeed"),
+            "winddirection_deg": cw.get("winddirection"),
             "humidity_pct": humidity,
             "pressure_hpa": pressure,
             "status": "ok",
@@ -134,6 +146,7 @@ def get_weather():
         return {
             "temperature_c": None,
             "windspeed_kmh": None,
+            "winddirection_deg": None,
             "humidity_pct": None,
             "pressure_hpa": None,
             "status": "missing",
@@ -143,15 +156,120 @@ def get_weather():
 weather = get_weather()
  
 if weather["status"] == "ok":
+    compass = degrees_to_compass(weather["winddirection_deg"])
+    wind_dir_text = f"{compass} ({weather['winddirection_deg']:.0f}°)" if compass else "—"
     weather_text = (
         f"Air temperature: {weather['temperature_c']} °C\n"
         f"Wind speed: {weather['windspeed_kmh']} km/h\n"
+        f"Wind direction: {wind_dir_text}\n"
         f"Humidity: {weather['humidity_pct']} %\n"
         f"Pressure: {weather['pressure_hpa']} hPa\n"
         f"Source: Open-Meteo (ERA5-based forecast/analysis)"
     )
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
+ 
+ 
+# =========================================================
+# MODULE 1a-2 — LAND WEATHER FORECAST (next 5 days)
+# Extends the existing Open-Meteo call with a daily forecast block —
+# separate API parameters (daily=...) from current_weather, so this is
+# an additional, independent request rather than reusing the same payload.
+# =========================================================
+def get_land_forecast(days=5):
+    try:
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": LAT,
+            "longitude": LON,
+            "daily": "temperature_2m_max,temperature_2m_min,windspeed_10m_max,winddirection_10m_dominant,precipitation_sum",
+            "forecast_days": days,
+            "timezone": "UTC",
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        daily = data.get("daily", {})
+ 
+        days_list = []
+        for i, day_str in enumerate(daily.get("time", [])):
+            days_list.append({
+                "date": day_str,
+                "temp_max": daily["temperature_2m_max"][i],
+                "temp_min": daily["temperature_2m_min"][i],
+                "wind_max_kmh": daily["windspeed_10m_max"][i],
+                "wind_dir_deg": daily["winddirection_10m_dominant"][i],
+                "precip_mm": daily["precipitation_sum"][i],
+            })
+        return days_list
+    except Exception as e:
+        print("LAND FORECAST FETCH FAILED:", e)
+        return []
+ 
+ 
+land_forecast_days = get_land_forecast()
+ 
+if land_forecast_days:
+    lines = []
+    for d in land_forecast_days:
+        day_label = datetime.strptime(d["date"], "%Y-%m-%d").strftime("%a %b %d")
+        compass = degrees_to_compass(d["wind_dir_deg"])
+        lines.append(
+            f"{day_label}: {d['temp_min']:.0f}–{d['temp_max']:.0f} °C, "
+            f"wind up to {d['wind_max_kmh']:.0f} km/h {compass or ''}, "
+            f"precip {d['precip_mm']:.1f} mm"
+        )
+    land_forecast_text = "\n".join(lines) + "\nSource: Open-Meteo"
+else:
+    land_forecast_text = "Land forecast unavailable — fetch failed. Check Action logs."
+ 
+ 
+# =========================================================
+# MODULE 1a-3 — MARINE FORECAST (Environment Canada, Yukon Coast)
+# Source: Environment Canada Atom feed for marine zone 16000, which
+# covers Herschel Island / Yukon Coast. The feed returns natural-language
+# forecast text per period (e.g. "Wind light becoming southeast 15 knots"),
+# not structured numeric fields, so we display the text as published
+# rather than trying to parse specific values out of free-form wording.
+# =========================================================
+def get_marine_forecast():
+    try:
+        import xml.etree.ElementTree as ET
+ 
+        url = "https://weather.gc.ca/rss/marine/16000_e.xml"
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+ 
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        root = ET.fromstring(r.content)
+ 
+        entries = []
+        for entry in root.findall("atom:entry", ns):
+            title_el = entry.find("atom:title", ns)
+            summary_el = entry.find("atom:summary", ns)
+            title = title_el.text if title_el is not None else ""
+            summary = summary_el.text if summary_el is not None else ""
+            entries.append({"title": title, "summary": summary})
+        return entries
+    except Exception as e:
+        print("MARINE FORECAST FETCH FAILED:", e)
+        return []
+ 
+ 
+marine_entries = get_marine_forecast()
+ 
+if marine_entries:
+    # The feed mixes forecast periods with warnings/synopsis entries; show
+    # the first several as-is, since titles already summarize each one
+    # (e.g. "Wind", "Waves", "Extended Forecast", "Ice Forecast").
+    lines = []
+    for e in marine_entries[:6]:
+        title = e["title"].strip()
+        summary = e["summary"].strip() if e["summary"] else ""
+        lines.append(f"{title}: {summary}" if summary and summary != title else title)
+    marine_text = "\n\n".join(lines) + "\n\nSource: Environment Canada (Yukon Coast marine zone)"
+else:
+    marine_text = "Marine forecast unavailable — fetch failed. Check Action logs."
  
  
 # =========================================================
@@ -504,6 +622,12 @@ blocks.append(paragraph(modis_caption))
 blocks += [
     heading("🌡 Weather"),
     paragraph(weather_text),
+ 
+    heading("📅 Land Forecast — next 5 days"),
+    paragraph(land_forecast_text),
+ 
+    heading("⚓ Marine Forecast — Yukon Coast"),
+    paragraph(marine_text),
  
     heading("☀️ Sunrise / Sunset"),
     paragraph(sun_text),
