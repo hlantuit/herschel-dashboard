@@ -453,14 +453,19 @@ if weather["status"] == "ok":
     wind_dir_text = f"{compass} ({weather['winddirection_deg']:.0f}°)" if compass else "—"
     weather_text = [
         ("Air temperature: ", f"{weather['temperature_c']} °C"),
-        ("Wind speed: ", f"{weather['windspeed_kmh']} km/h"),
-        ("Wind direction: ", wind_dir_text),
         ("Humidity: ", f"{weather['humidity_pct']} %"),
         ("Pressure: ", f"{weather['pressure_hpa']} hPa"),
         "Source: Open-Meteo (ERA5-based forecast/analysis)",
     ]
+    wind_now_text = [
+        ("Wind speed: ", f"{weather['windspeed_kmh']} km/h"),
+        ("Wind direction: ", wind_dir_text),
+        "See 30-day wind pattern chart below.",
+        "Source: Open-Meteo (ERA5-based forecast/analysis)",
+    ]
 else:
     weather_text = "Weather data unavailable — fetch failed. Check Action logs."
+    wind_now_text = "Wind data unavailable — fetch failed. Check Action logs."
  
  
 # =========================================================
@@ -2507,9 +2512,45 @@ blocks = [
         "(automatically adjusts for daylight saving)."
     ),
     divider(),
- 
-    heading("🛰 Satellite — MODIS True Color"),
 ]
+ 
+# --- TODAY'S CONDITIONS — compact snapshot cards, 2x2 grid ---
+# This is the most important, fastest-scanning part of the page, so it
+# comes first, before any imagery — each card shows only the current
+# value, no charts. The fuller 30-day/multi-day charts for wind and tide
+# remain further down the page in their own detailed sections, unchanged.
+blocks.append(heading("📍 Today's Conditions"))
+ 
+weather_card = [
+    heading("🌡 Weather", level=3),
+    callout(
+        weather_text,
+        emoji="🌡",
+        color="blue_background",
+        children=[weather_icon_block] if weather_icon_block else None,
+    ),
+]
+ 
+wind_card = [
+    heading("🧭 Wind", level=3),
+    callout(wind_now_text, emoji="🧭", color="blue_background"),
+]
+ 
+tide_card = [
+    heading("🌊 Tide", level=3),
+    callout(tide_text, emoji="🌊", color="blue_background"),
+]
+ 
+sun_card = [
+    heading("☀️ Sun", level=3),
+    callout(sun_text, emoji="☀️", color="blue_background"),
+]
+ 
+blocks.append(columns(weather_card, wind_card))
+blocks.append(columns(tide_card, sun_card))
+blocks.append(divider())
+ 
+blocks.append(heading("🛰 Satellite — MODIS True Color"))
 if modis_block:
     blocks.append(modis_block)
  
@@ -2803,33 +2844,16 @@ blocks.append(paragraph(sentinel1_caption))
 blocks.append(link_paragraph("Explore here →", sentinel1_url, prefix="Browse Sentinel-1 imagery directly on Copernicus Browser.  "))
 blocks.append(divider())
  
-# --- Row 1: current conditions (weather) + sun, side by side ---
-weather_column = [
-    heading("🌡 Weather", level=3),
-    callout(
-        weather_text,
-        emoji="🌡",
-        color="blue_background",
-        children=[weather_icon_block] if weather_icon_block else None,
-    ),
-]
- 
-sun_column = [
-    heading("☀️ Sunrise / Sunset", level=3),
-    callout(sun_text, emoji="☀️", color="yellow_background"),
-]
-if sun_chart_block:
-    sun_column.append(sun_chart_block)
-sun_column.append(paragraph(sun_chart_caption if sun_chart_bytes else "Sun position chart could not be generated — see Action logs."))
- 
-blocks.append(columns(weather_column, sun_column))
- 
 blocks.append(divider())
  
 # --- Row 2: weather forecast table (full width) then marine forecast ---
 blocks.append(heading("📅 Weather Forecast — next 5 days", level=3))
-if land_forecast_table_block:
-    blocks.append(land_forecast_table_block)
+blocks.append(callout(
+    "5-day outlook:",
+    emoji="📅",
+    color="purple_background",
+    children=[land_forecast_table_block] if land_forecast_table_block else None,
+))
 blocks.append(paragraph(land_forecast_caption))
  
 blocks.append(divider())
@@ -2860,6 +2884,14 @@ blocks.append(heading("🧭 Wind — last 30 days"))
 if wind_chart_block:
     blocks.append(wind_chart_block)
 blocks.append(paragraph(wind_chart_caption if wind_chart_bytes else "Wind vector chart could not be generated — see Action logs."))
+ 
+blocks.append(divider())
+ 
+# --- Sun position chart (full width) ---
+blocks.append(heading("☀️ Sun Position Today", level=3))
+if sun_chart_block:
+    blocks.append(sun_chart_block)
+blocks.append(paragraph(sun_chart_caption if sun_chart_bytes else "Sun position chart could not be generated — see Action logs."))
  
 blocks.append(divider())
  
@@ -2925,3 +2957,4 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
+ 
