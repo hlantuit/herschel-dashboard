@@ -1165,12 +1165,12 @@ def uv_to_wind(u, v):
     return speed, direction_deg
  
  
-def fetch_hourly_wind(start_date, end_date):
+def fetch_hourly_wind_chunk(start_date, end_date):
     """
-    Fetches hourly wind speed and direction for [start_date, end_date]
-    from Open-Meteo's historical archive. Returns a dict
+    Fetches hourly wind speed and direction for a single [start_date,
+    end_date] window from Open-Meteo's historical archive. Returns a dict
     {date_str: [(speed, direction), ...]} grouped by calendar day, or {}
-    on failure.
+    on failure for just this chunk.
     """
     try:
         url = "https://archive-api.open-meteo.com/v1/archive"
@@ -1182,7 +1182,7 @@ def fetch_hourly_wind(start_date, end_date):
             "hourly": "windspeed_10m,winddirection_10m",
             "timezone": "UTC",
         }
-        r = get_with_retry(url, params=params, timeout=30, retries=1)
+        r = get_with_retry(url, params=params, timeout=30, retries=2)
         data = r.json()
         hourly = data.get("hourly", {})
         times = hourly.get("time", [])
@@ -1197,8 +1197,33 @@ def fetch_hourly_wind(start_date, end_date):
             by_day.setdefault(day, []).append((s, d))
         return by_day
     except Exception as e:
-        print("WIND VECTOR FETCH FAILED:", e)
+        print(f"WIND VECTOR CHUNK FETCH FAILED for {start_date} to {end_date}:", e)
         return {}
+ 
+ 
+def fetch_hourly_wind(start_date, end_date, chunk_days=10):
+    """
+    Fetches hourly wind speed/direction across [start_date, end_date] by
+    splitting the request into smaller chunks (default 10 days each).
+    This is more resilient than one large request: archive-api.open-meteo.com
+    has shown frequent timeouts on this project's larger historical calls,
+    and a failure in one chunk only loses that chunk's days rather than
+    the entire requested window.
+    """
+    combined = {}
+    chunk_start = start_date
+    while chunk_start <= end_date:
+        chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), end_date)
+        chunk_data = fetch_hourly_wind_chunk(chunk_start, chunk_end)
+        combined.update(chunk_data)
+        chunk_start = chunk_end + timedelta(days=1)
+ 
+    if not combined:
+        print("WIND VECTOR FETCH FAILED: all chunks returned no data")
+    elif len(combined) < (end_date - start_date).days:
+        print(f"WIND VECTOR FETCH: partial data only — got {len(combined)} of {(end_date - start_date).days + 1} expected days")
+ 
+    return combined
  
  
 def build_wind_vector_chart():
@@ -1241,13 +1266,15 @@ def build_wind_vector_chart():
         x = list(range(len(day_labels)))
         # Arrow components: direction is where wind comes FROM, so the
         # arrow should point in the direction the wind blows TOWARD —
-        # that's 180 degrees from the "from" direction.
-        u_arrows = [-math.sin(math.radians(d)) for d in daily_dir]
-        v_arrows = [-math.cos(math.radians(d)) for d in daily_dir]
+        # that's 180 degrees from the "from" direction. Length is now
+        # scaled by speed, so faster days show longer arrows on top of
+        # the existing color-by-speed encoding.
+        u_arrows = [-math.sin(math.radians(d)) * s for d, s in zip(daily_dir, daily_speed)]
+        v_arrows = [-math.cos(math.radians(d)) * s for d, s in zip(daily_dir, daily_speed)]
  
         quiv = ax.quiver(
             x, [0] * len(x), u_arrows, v_arrows,
-            daily_speed, cmap="YlOrRd", scale=24, width=0.005,
+            daily_speed, cmap="YlOrRd", scale=220, width=0.005,
             pivot="middle", clim=(0, 40),  # 0-40 km/h covers typical regional range without making calm days look artificially extreme
         )
  
@@ -1537,7 +1564,7 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
  
         # Dashed line: draw only the "on" segments of a repeating
         # on/off pattern along the p1->p2 line.
-        num_dashes = 24
+        num_dashes = 120
         for i in range(num_dashes):
             if i % 2 != 0:
                 continue  # skip every other segment to create the dash gap
@@ -1697,8 +1724,20 @@ def build_tide_chart(tide_points):
         ax.spines["bottom"].set_color(NOTION_LIGHT_GRID)
  
         ax.set_xlim(0, max(hours))
-        tick_hours = list(range(0, int(max(hours)) + 1, 6))
-        tick_labels = [(t0 + timedelta(hours=h)).strftime("%H:%M") for h in tick_hours]
+ 
+        # Build tick positions at clean clock hours (e.g. 22:00, 04:00),
+        # not fixed offsets from t0's exact minute (which previously
+        # produced labels like "22:36" instead of a round hour).
+        first_tick_time = t0.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        if first_tick_time < t0:
+            first_tick_time += timedelta(hours=1)
+        tick_times = []
+        t = first_tick_time
+        while (t - t0).total_seconds() / 3600 <= max(hours):
+            tick_times.append(t)
+            t += timedelta(hours=6)
+        tick_hours = [(t - t0).total_seconds() / 3600 for t in tick_times]
+        tick_labels = [t.strftime("%H:%M") for t in tick_times]
         ax.set_xticks(tick_hours)
         ax.set_xticklabels(tick_labels, fontsize=9, color=NOTION_TEXT_GRAY)
         ax.tick_params(axis="y", labelsize=9, colors=NOTION_TEXT_GRAY, length=0)
@@ -1707,6 +1746,18 @@ def build_tide_chart(tide_points):
         ax.xaxis.grid(False)
         ax.set_axisbelow(True)
         ax.set_ylabel("Water level (m)", fontsize=10, color=NOTION_TEXT_GRAY)
+ 
+        # Label the current-time marker directly in red, so "now" is
+        # unambiguous rather than relying on the reader to infer it from
+        # the dot's position alone.
+        y_range = max(levels) - min(levels)
+        label_offset = y_range * 0.08 if y_range > 0 else 0.05
+        ax.annotate(
+            "now", xy=(current_hour, current_level),
+            xytext=(current_hour, current_level + label_offset),
+            color=NOTION_RED, fontsize=10, fontweight="bold",
+            ha="center", va="bottom",
+        )
  
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
