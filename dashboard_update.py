@@ -1014,14 +1014,37 @@ temp_chart_bytes, temp_chart_caption = build_temperature_chart()
 # =========================================================
 # MODULE 2 — SATELLITE: MODIS true color via GIBS WMS
 # =========================================================
-MODIS_WIDTH_PX = 1024
-MODIS_HEIGHT_PX = 1024  # square image, since the new bbox is a square in meters
+# Final displayed image size (after rotation + crop).
+MODIS_FINAL_SIZE_PX = 1024
+ 
+# GIBS's polar stereographic image is only north-up exactly along its
+# central meridian (-45°). Herschel Island is far from that meridian, so
+# the raw image comes back rotated relative to true north — the further a
+# point is from -45° longitude, the more it's rotated. We fix this by
+# fetching a larger image than needed, rotating it so true north points up
+# at Herschel Island's location, then cropping back to the final size.
+# The oversize factor below covers the worst-case corner loss from
+# rotating a square image by any angle, with extra margin for safety.
+MODIS_OVERSIZE_FACTOR = 1.2
+MODIS_FETCH_SIZE_PX = int(MODIS_FINAL_SIZE_PX * MODIS_OVERSIZE_FACTOR)
+ 
+# Rotation angle (degrees, clockwise) needed to make true north point up
+# at Herschel Island. Computed from the meridian convergence: the angle
+# between Herschel Island's local meridian and the EPSG:3413 central
+# meridian (-45°), found geometrically as the direction from Herschel
+# Island's projected position toward the pole (the projection's origin).
+MODIS_ROTATION_DEG = 86.09
  
 # Polar stereographic bbox (EPSG:3413, meters), centered on Herschel Island,
-# replacing the old geographic (lat/lon) bbox. Computed as a 300km x 300km
-# square (±150km from center) around Herschel Island's EPSG:3413 coordinates
-# (x=-2230848, y=152544), verified against pyproj to sub-meter precision.
-BBOX_3413 = "-2380848,2544,-2080848,302544"
+# sized to the oversized fetch dimensions above (so after rotation and
+# crop, the final 1024x1024 frame is fully covered by real imagery, with
+# no blank corners introduced by the rotation).
+_HERSCHEL_X, _HERSCHEL_Y = -2230848, 152544  # verified against pyproj earlier
+_half_width_m = 150_000 * MODIS_OVERSIZE_FACTOR
+BBOX_3413 = (
+    f"{_HERSCHEL_X - _half_width_m:.0f},{_HERSCHEL_Y - _half_width_m:.0f},"
+    f"{_HERSCHEL_X + _half_width_m:.0f},{_HERSCHEL_Y + _half_width_m:.0f}"
+)
  
  
 def build_gibs_url(date_str):
@@ -1033,8 +1056,8 @@ def build_gibs_url(date_str):
         "STYLES": "",
         "FORMAT": "image/png",
         "TRANSPARENT": "false",
-        "WIDTH": str(MODIS_WIDTH_PX),
-        "HEIGHT": str(MODIS_HEIGHT_PX),
+        "WIDTH": str(MODIS_FETCH_SIZE_PX),
+        "HEIGHT": str(MODIS_FETCH_SIZE_PX),
         "SRS": "EPSG:3413",
         "BBOX": BBOX_3413,
         "TIME": date_str,
@@ -1042,6 +1065,37 @@ def build_gibs_url(date_str):
     base = "https://gibs.earthdata.nasa.gov/wms/epsg3413/best/wms.cgi"
     query = "&".join(f"{k}={v}" for k, v in params.items())
     return f"{base}?{query}"
+ 
+ 
+def rotate_to_north_up(png_bytes):
+    """
+    Rotates the fetched (oversized) polar stereographic image so true
+    north points up at Herschel Island, then center-crops to the final
+    display size. Returns the original bytes unchanged if this fails for
+    any reason, so a rotation bug never blocks the image from displaying.
+    """
+    try:
+        from PIL import Image
+        import io as _io
+ 
+        img = Image.open(_io.BytesIO(png_bytes)).convert("RGB")
+ 
+        # PIL rotates counter-clockwise for positive angles; we computed
+        # MODIS_ROTATION_DEG as the clockwise angle needed, so negate it.
+        rotated = img.rotate(-MODIS_ROTATION_DEG, resample=Image.BICUBIC, expand=False)
+ 
+        # Center-crop to the final size
+        w, h = rotated.size
+        left = (w - MODIS_FINAL_SIZE_PX) // 2
+        top = (h - MODIS_FINAL_SIZE_PX) // 2
+        cropped = rotated.crop((left, top, left + MODIS_FINAL_SIZE_PX, top + MODIS_FINAL_SIZE_PX))
+ 
+        out_buf = _io.BytesIO()
+        cropped.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+    except Exception as e:
+        print("MODIS ROTATION FAILED (showing unrotated image instead):", e)
+        return png_bytes
  
  
 def fetch_modis_image(max_days_back=5):
@@ -1102,20 +1156,19 @@ def latlon_to_3413(lat_deg, lon_deg):
 def annotate_modis_image(png_bytes, points=None, scale_km=50):
     """
     Draws label markers at the given coordinates and a scale bar on the
-    MODIS image, which is now requested from GIBS in the Arctic polar
-    stereographic projection (EPSG:3413) rather than plain geographic
-    (EPSG:4326). Pixel position is computed by converting each point's
-    lat/lon to EPSG:3413 projected meters (matching what GIBS used to
-    render the image), then mapping those meters linearly onto the image
-    using the same BBOX_3413 bounds as the GetMap request.
+    MODIS image. The image itself has already been rotated to north-up
+    and cropped to MODIS_FINAL_SIZE_PX by rotate_to_north_up() before this
+    function runs. To place points consistently with that same rotation,
+    each point's (x, y) offset from Herschel Island's center, in EPSG:3413
+    projected meters, is rotated by the same angle used for the image,
+    then mapped onto the final square frame (which is centered on
+    Herschel Island by construction).
  
     points: list of (lat, lon, label) or (lat, lon, label, text_dy_offset)
     tuples. Defaults to Herschel Island and Shingle Point if not given.
  
-    The scale bar is now a simple, uniform meters-per-pixel calculation —
-    unlike the old geographic version, polar stereographic doesn't need a
-    latitude correction, since BBOX_3413 is already a square in projected
-    meters and distances scale consistently across the image.
+    The scale bar uses a uniform meters-per-pixel value, valid since
+    rotation preserves distances and the frame is centered consistently.
  
     Returns annotated PNG bytes, or the original bytes unchanged if
     annotation fails for any reason (so a drawing bug never blocks the
@@ -1133,9 +1186,13 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
  
         img = Image.open(_io.BytesIO(png_bytes)).convert("RGB")
         draw = ImageDraw.Draw(img)
-        width_px, height_px = img.size
+        width_px, height_px = img.size  # should be MODIS_FINAL_SIZE_PX square
  
-        minx, miny, maxx, maxy = map(float, BBOX_3413.split(","))
+        # Meters-per-pixel for the FINAL (post-crop) frame, not the
+        # oversized fetch — this is the actual resolution of what's shown.
+        meters_per_px = (150_000 * 2) / MODIS_FINAL_SIZE_PX  # final frame covers the original ±150km
+ 
+        rotation_rad = math.radians(MODIS_ROTATION_DEG)
  
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
@@ -1151,10 +1208,21 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
                 text_dy = -10
  
             x_m, y_m = latlon_to_3413(lat, lon)
-            x_frac = (x_m - minx) / (maxx - minx)
-            y_frac = 1 - (y_m - miny) / (maxy - miny)  # y=0 at top, north
-            x_px = x_frac * width_px
-            y_px = y_frac * height_px
+            dx_m = x_m - _HERSCHEL_X
+            dy_m = y_m - _HERSCHEL_Y
+ 
+            # Rotate this offset by the same angle used to rotate the
+            # image (clockwise by MODIS_ROTATION_DEG), so the point lands
+            # in the same relative position it would in the rotated image.
+            cos_r, sin_r = math.cos(rotation_rad), math.sin(rotation_rad)
+            dx_rot = dx_m * cos_r - dy_m * sin_r
+            dy_rot = dx_m * sin_r + dy_m * cos_r
+ 
+            # Map onto the final frame: center of frame = Herschel Island,
+            # +x = right, and projected +y = north so -dy_rot = down in
+            # image space (image y increases downward).
+            x_px = width_px / 2 + dx_rot / meters_per_px
+            y_px = height_px / 2 - dy_rot / meters_per_px
  
             marker_radius = 6
             draw.ellipse(
@@ -1163,16 +1231,12 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
             )
  
             text_x, text_y = x_px + 12, y_px + text_dy
-            for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
-                draw.text((text_x + dx, text_y + dy), label_text, font=font, fill=(0, 0, 0))
+            for tdx, tdy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                draw.text((text_x + tdx, text_y + tdy), label_text, font=font, fill=(0, 0, 0))
             draw.text((text_x, text_y), label_text, font=font, fill=(255, 255, 255))
  
         # --- Scale bar (bottom-left corner) ---
-        # Uniform meters-per-pixel across the whole image — no latitude
-        # correction needed, since this is a square bbox in projected
-        # meters, not degrees.
-        total_m = maxx - minx
-        px_per_km = width_px / (total_m / 1000)
+        px_per_km = 1000 / meters_per_px
  
         bar_px = scale_km * px_per_km
         margin = 30
@@ -1195,6 +1259,8 @@ def annotate_modis_image(png_bytes, points=None, scale_km=50):
  
  
 modis_bytes, modis_date = fetch_modis_image()
+if modis_bytes:
+    modis_bytes = rotate_to_north_up(modis_bytes)
 if modis_bytes:
     modis_bytes = annotate_modis_image(modis_bytes)
  
@@ -1439,4 +1505,3 @@ print("Dashboard updated successfully")
 #   netCDF4
 #   notion-client
 #   requests
- 
