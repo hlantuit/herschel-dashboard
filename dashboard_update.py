@@ -1275,7 +1275,7 @@ def build_wind_vector_chart():
         quiv = ax.quiver(
             x, [0] * len(x), u_arrows, v_arrows,
             daily_speed, cmap="YlOrRd", scale=220, width=0.005,
-            pivot="middle", clim=(0, 40),  # 0-40 km/h covers typical regional range without making calm days look artificially extreme
+            pivot="tail", clim=(0, 40),  # 0-40 km/h covers typical regional range without making calm days look artificially extreme
         )
  
         cbar = fig.colorbar(quiv, ax=ax, orientation="vertical", pad=0.02, fraction=0.04)
@@ -1749,14 +1749,17 @@ def build_tide_chart(tide_points):
  
         # Label the current-time marker directly in red, so "now" is
         # unambiguous rather than relying on the reader to infer it from
-        # the dot's position alone.
-        y_range = max(levels) - min(levels)
-        label_offset = y_range * 0.08 if y_range > 0 else 0.05
+        # the dot's position alone. Offset to the right (not straight up)
+        # since current_hour sits near the start of the chart (x=0), where
+        # an upward offset would crowd the y-axis; a horizontal offset
+        # also more reliably clears the curve regardless of its local slope.
+        x_range = max(hours) if hours else 24
+        x_offset = x_range * 0.035
         ax.annotate(
             "now", xy=(current_hour, current_level),
-            xytext=(current_hour, current_level + label_offset),
+            xytext=(current_hour + x_offset, current_level),
             color=NOTION_RED, fontsize=10, fontweight="bold",
-            ha="center", va="bottom",
+            ha="left", va="center",
         )
  
         fig.tight_layout()
