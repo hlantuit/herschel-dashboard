@@ -2897,7 +2897,7 @@ def fetch_copernicus_water_level():
         # grid cells in each direction) and use the nearest cell that
         # actually has valid data, rather than trusting the nearest
         # match blindly.
-        search_radius_m = 15_000  # ~5 grid cells in each direction
+        search_radius_m = 50_000  # widened from 15km after repeated "no grid cells found" — hedges against a coastal coverage gap larger than originally assumed, pending live-run diagnostics to confirm the exact cause
         x_coords = ds["x"].values
         y_coords = ds["y"].values
         x_ascending = x_coords[0] < x_coords[-1] if len(x_coords) > 1 else True
@@ -3334,19 +3334,78 @@ def find_latest_sentinel1_date(token, lookback_days=10):
             return None, None
  
         # Require each candidate's own bbox to genuinely contain Herschel
-        # Island with a small margin (~10km), not just overlap our search
-        # box at a corner.
-        margin_deg_lat = 10 / 111
-        margin_deg_lon = 10 / (111 * math.cos(math.radians(LAT)))
+        # Island with a real safety margin (~30km), not just barely touch
+        # the point — the marker dot and its label text need actual image
+        # data underneath them, not the gray "uncovered" background. A
+        # smaller margin (previously 10km) let through scenes whose
+        # actual coverage technically included the point but not enough
+        # surrounding area for the marker/label to render on real data.
+        margin_deg_lat = 30 / 111
+        margin_deg_lon = 30 / (111 * math.cos(math.radians(LAT)))
+        def _point_in_ring(lon, lat, ring):
+            """
+            Standard ray-casting point-in-polygon test against a single
+            linear ring (list of [lon, lat] coordinate pairs). No new
+            dependency (e.g. shapely) needed for this — it's a compact,
+            well-known algorithm.
+            """
+            n = len(ring)
+            inside = False
+            j = n - 1
+            for i in range(n):
+                xi, yi = ring[i][0], ring[i][1]
+                xj, yj = ring[j][0], ring[j][1]
+                if ((yi > lat) != (yj > lat)) and (
+                    lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-15) + xi
+                ):
+                    inside = not inside
+                j = i
+            return inside
+ 
+        def _point_covered_by_geometry(lon, lat, geometry, margin_deg):
+            """
+            Checks whether (lon, lat) falls within the geometry with a
+            safety margin, by also testing the four points offset by
+            margin_deg in each cardinal direction — if all five points
+            (center + 4 offsets) are inside, there's real coverage in
+            every direction around the target, not just at the bare point.
+            """
+            if not geometry:
+                return False
+            gtype = geometry.get("type")
+            coords = geometry.get("coordinates")
+            if gtype == "Polygon":
+                rings = [coords[0]]  # outer ring only; ignoring holes is fine for a coverage check
+            elif gtype == "MultiPolygon":
+                rings = [poly[0] for poly in coords]
+            else:
+                return False
+ 
+            test_points = [
+                (lon, lat),
+                (lon - margin_deg, lat), (lon + margin_deg, lat),
+                (lon, lat - margin_deg), (lon, lat + margin_deg),
+            ]
+            for tlon, tlat in test_points:
+                if not any(_point_in_ring(tlon, tlat, ring) for ring in rings):
+                    return False
+            return True
+ 
         covering_features = []
         for f in features:
-            fbbox = f.get("bbox")
-            if not fbbox or len(fbbox) < 4:
-                continue
-            fminx, fminy, fmaxx, fmaxy = fbbox[0], fbbox[1], fbbox[2], fbbox[3]
-            if (fminx + margin_deg_lon <= LON <= fmaxx - margin_deg_lon and
-                    fminy + margin_deg_lat <= LAT <= fmaxy - margin_deg_lat):
+            geometry = f.get("geometry")
+            if geometry and _point_covered_by_geometry(LON, LAT, geometry, margin_deg_lon):
                 covering_features.append(f)
+                continue
+            # Fallback: bbox-margin approximation, only used if geometry
+            # is missing from this particular feature's response.
+            if not geometry:
+                fbbox = f.get("bbox")
+                if fbbox and len(fbbox) >= 4:
+                    fminx, fminy, fmaxx, fmaxy = fbbox[0], fbbox[1], fbbox[2], fbbox[3]
+                    if (fminx + margin_deg_lon <= LON <= fmaxx - margin_deg_lon and
+                            fminy + margin_deg_lat <= LAT <= fmaxy - margin_deg_lat):
+                        covering_features.append(f)
  
         if not covering_features:
             print("SENTINEL-1: scenes found nearby, but none actually cover Herschel Island with margin")
@@ -3683,4 +3742,3 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
- 
