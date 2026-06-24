@@ -1416,10 +1416,14 @@ def build_wind_vector_chart():
         u_arrows = [-math.sin(math.radians(d)) * s for d, s in zip(daily_dir, daily_speed)]
         v_arrows = [-math.cos(math.radians(d)) * s for d, s in zip(daily_dir, daily_speed)]
  
+        # Faint baseline showing the shared line all arrow tails sit on —
+        # drawn first (zorder=1) so the arrows render on top of it.
+        ax.axhline(0, color=NOTION_LIGHT_GRID, linewidth=1.2, zorder=1)
+ 
         quiv = ax.quiver(
             x, [0] * len(x), u_arrows, v_arrows,
             daily_speed, cmap="YlOrRd", scale=220, width=0.005,
-            pivot="tail", clim=(0, 40),  # 0-40 km/h covers typical regional range without making calm days look artificially extreme
+            pivot="tail", clim=(0, 40), zorder=2,  # 0-40 km/h covers typical regional range without making calm days look artificially extreme
         )
  
         cbar = fig.colorbar(quiv, ax=ax, orientation="vertical", pad=0.02, fraction=0.04)
@@ -1438,7 +1442,12 @@ def build_wind_vector_chart():
         ax.set_yticks([])
         ax.tick_params(axis="x", length=0)
         ax.set_ylim(-1.5, 1.5)
-        ax.set_xlim(-1, len(x))
+        # Wider left/right margin than before — arrows are anchored at
+        # their tail (pivot="tail") and can extend a full speed-scaled
+        # length in any direction from each day's x position, so the
+        # first/last days' arrows need more room than a simple -1/+1
+        # margin to avoid being clipped at the plot edge.
+        ax.set_xlim(-2, len(x) + 1)
  
         fig.tight_layout()
         png_bytes = fig_to_png_bytes(fig)
@@ -2459,25 +2468,12 @@ blocks.append(paragraph(wind_chart_caption if wind_chart_bytes else "Wind vector
  
 blocks.append(divider())
  
-# --- Row 3: tides + permafrost, side by side ---
-tide_column = [
-    heading("🌊 Tides", level=3),
-    callout(tide_text, emoji="🌊", color="blue_background"),
-]
+# --- Tides (full width, no longer paired with permafrost) ---
+blocks.append(heading("🌊 Tides", level=3))
+blocks.append(callout(tide_text, emoji="🌊", color="blue_background"))
 if tide_chart_block:
-    tide_column.append(tide_chart_block)
-tide_column.append(paragraph(tide_chart_caption if tide_chart_bytes else "Tide chart could not be generated — see Action logs."))
- 
-permafrost_column = [
-    heading("🧊 Permafrost (boreholes)", level=3),
-    callout(
-        "Placeholder — no live data source configured yet. Add borehole logger endpoint here when available.",
-        emoji="🧊",
-        color="gray_background",
-    ),
-    link_paragraph("→ GTN-P Global Terrestrial Network for Permafrost database", "https://data.gtn-p.org/"),
-]
-blocks.append(columns(tide_column, permafrost_column))
+    blocks.append(tide_chart_block)
+blocks.append(paragraph(tide_chart_caption if tide_chart_bytes else "Tide chart could not be generated — see Action logs."))
  
 blocks.append(divider())
  
@@ -2491,11 +2487,12 @@ blocks.append(paragraph(water_level_chart_caption if water_level_chart_bytes els
 blocks.append(divider())
 blocks.append(disclaimer_paragraph(
     "Disclaimer: All data and imagery on this page are collated from external third-party sources "
-    "(including NASA GIBS/EOSDIS, Open-Meteo, sunrise-sunset.org, Environment Canada, DFO/CHS, and "
-    "Copernicus Marine Service) and are displayed here for general informational purposes only. We "
-    "hold no responsibility for the accuracy, completeness, or timeliness of this data, and this page "
-    "is not a substitute for official sources. Do not use this information for navigation, "
-    "safety-critical decisions, or any other purpose where inaccurate or delayed data could cause harm."
+    "(including NASA GIBS/EOSDIS, Open-Meteo, sunrise-sunset.org, Environment Canada, DFO/CHS, "
+    "the Norwegian Meteorological Institute, and Copernicus Sentinel Hub/Data Space Ecosystem) and "
+    "are displayed here for general informational purposes only. We hold no responsibility for "
+    "the accuracy, completeness, or timeliness of this data, and this page is not a substitute for "
+    "official sources. Do not use this information for navigation, safety-critical decisions, or any "
+    "other purpose where inaccurate or delayed data could cause harm."
 ))
  
 # =========================================================
