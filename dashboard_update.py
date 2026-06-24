@@ -1,6 +1,7 @@
 
 import os
 import io
+import json
 import math
 import time
 import requests
@@ -18,6 +19,43 @@ NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 PAGE_ID = os.environ["NOTION_PAGE_ID"]
  
 notion = Client(auth=NOTION_TOKEN)
+ 
+# =========================================================
+# HISTORICAL DATA CACHE
+# Historical (complete, past) years of daily temperature never change once
+# fetched — only the current (in-progress) year needs refreshing. This
+# cache stores one full calendar year of daily mean temperatures per
+# entry, keyed by year, in a JSON file committed back to the repo by the
+# workflow after each run (see the "Commit cache" step in the workflow
+# YAML). A year is only ever fetched from Open-Meteo once; every run
+# after that reads it from this file instead, removing most of this
+# script's exposure to Open-Meteo's demonstrated intermittent timeouts.
+# =========================================================
+CACHE_FILE_PATH = "cache/daily_temps_cache.json"
+ 
+ 
+def load_temp_cache():
+    """Loads the historical temperature cache from disk, or {} if missing/corrupt."""
+    try:
+        with open(CACHE_FILE_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"CACHE: could not load {CACHE_FILE_PATH} ({e}), starting with empty cache")
+        return {}
+ 
+ 
+def save_temp_cache(cache):
+    """Writes the cache back to disk. Creates the cache/ directory if needed."""
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
+        with open(CACHE_FILE_PATH, "w") as f:
+            json.dump(cache, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"CACHE: failed to save {CACHE_FILE_PATH}: {e}")
+ 
+ 
+_temp_cache = load_temp_cache()
+_temp_cache_dirty = False  # tracks whether anything new was added this run, so we only write if needed
  
 # =========================================================
 # SITE CONSTANTS — Herschel Island / Qikiqtaruk
@@ -1032,6 +1070,38 @@ def fetch_daily_temps(start_date, end_date):
         return {}
  
  
+def fetch_full_year_cached(year):
+    """
+    Returns the complete Jan 1 - Dec 31 daily temperature dict for the
+    given (necessarily past, complete) year — from the on-disk cache if
+    already present, otherwise fetched fresh and added to the cache for
+    future runs. Never used for the current year, which is always
+    in-progress and must be fetched fresh every time.
+    """
+    global _temp_cache_dirty
+ 
+    cache_key = str(year)
+    if cache_key in _temp_cache:
+        return _temp_cache[cache_key]
+ 
+    year_start = date(year, 1, 1)
+    year_end = date(year, 12, 31)
+    temps = fetch_daily_temps(year_start, year_end)
+ 
+    days_in_year = (year_end - year_start).days + 1
+    if len(temps) >= days_in_year * 0.95:
+        # Only cache genuinely (near-)complete years — caching a partial
+        # year from a bad fetch would permanently "freeze in" an
+        # incomplete result, defeating the point of retrying later.
+        _temp_cache[cache_key] = temps
+        _temp_cache_dirty = True
+        print(f"CACHE: fetched and cached {year} ({len(temps)}/{days_in_year} days)")
+    else:
+        print(f"CACHE: {year} fetch incomplete ({len(temps)}/{days_in_year} days), not caching")
+ 
+    return temps
+ 
+ 
 # =========================================================
 # MODULE 1c — TEMPERATURE CHART: last 30 days vs 30-year daily normal
 # =========================================================
@@ -1062,14 +1132,23 @@ def build_temperature_chart():
     years_with_data = []  # tracks which specific years actually returned data
  
     for years_back in range(1, 31):
-        hist_start = start.replace(year=start.year - years_back)
-        hist_end = end.replace(year=end.year - years_back)
-        hist_data = fetch_daily_temps(hist_start, hist_end)
+        hist_year = end.year - years_back
+        hist_start = start.replace(year=hist_year)
+        hist_end = end.replace(year=hist_year)
+        full_year_data = fetch_full_year_cached(hist_year)
  
+        if not full_year_data:
+            continue
+ 
+        # Slice out just the needed window from the full year's data
+        hist_data = {
+            d: t for d, t in full_year_data.items()
+            if hist_start.strftime("%Y-%m-%d") <= d <= hist_end.strftime("%Y-%m-%d")
+        }
         if not hist_data:
             continue
  
-        years_with_data.append(end.year - years_back)
+        years_with_data.append(hist_year)
  
         # Map historical dates back onto this year's day labels by month/day
         for hist_date_str, temp in hist_data.items():
@@ -1221,40 +1300,48 @@ def build_tdd_histogram(num_years=25):
     Builds a bar chart of annual thawing degree days for the past
     num_years complete years, plus the current (partial) year in a
     different color. Returns (png_bytes, caption).
+ 
+    Past complete years are fetched via fetch_full_year_cached(), the
+    same on-disk cache used by the temperature chart's 30-year normal —
+    so a year already fetched for one chart doesn't need to be fetched
+    again for the other. A finished year's data never changes, so this
+    avoids re-fetching decades of data from Open-Meteo on every single
+    hourly run.
     """
     today = now.date()
     current_year = today.year
  
     tdd_by_year = {}
-    days_counted_by_year = {}
  
-    # Past complete years: Jan 1 - Dec 31
+    # Past complete years: Jan 1 - Dec 31, via the shared full-year cache
     for years_back in range(1, num_years + 1):
         year = current_year - years_back
         year_start = date(year, 1, 1)
         year_end = date(year, 12, 31)
-        temps = fetch_daily_temps(year_start, year_end)
+        temps = fetch_full_year_cached(year)
         if not temps:
-            print(f"TDD HISTOGRAM: no data for {year}, skipping")
+            print(f"TDD HISTOGRAM: no data for {year}, skipping (will retry next run)")
             continue
         tdd, days_counted = compute_tdd_from_temps(temps, year_start, year_end)
         # Require a reasonable fraction of the year's days to have data,
         # or a single short outage could badly understate that year's TDD.
+        # (fetch_full_year_cached already applies a 95% completeness bar
+        # before caching, but we double-check here in case a non-cached,
+        # genuinely incomplete fetch came back from a failed cache write.)
         days_in_year = (year_end - year_start).days + 1
         if days_counted < days_in_year * 0.8:
-            print(f"TDD HISTOGRAM: {year} only has {days_counted}/{days_in_year} days, skipping (too incomplete)")
+            print(f"TDD HISTOGRAM: {year} only has {days_counted}/{days_in_year} days, skipping (too incomplete, will retry next run)")
             continue
         tdd_by_year[year] = tdd
-        days_counted_by_year[year] = days_counted
  
-    # Current year: Jan 1 - yesterday (today's mean isn't final yet)
+    # Current year: Jan 1 - yesterday (today's mean isn't final yet) —
+    # always fetched fresh, never cached, since it's still accumulating.
     current_start = date(current_year, 1, 1)
     current_end = today - timedelta(days=1)
     current_temps = fetch_daily_temps(current_start, current_end)
     if current_temps:
         current_tdd, current_days = compute_tdd_from_temps(current_temps, current_start, current_end)
         tdd_by_year[current_year] = current_tdd
-        days_counted_by_year[current_year] = current_days
  
     if not tdd_by_year:
         return None, "Thawing degree days data unavailable — all fetches failed. Check Action logs."
@@ -2548,6 +2635,17 @@ for b in existing["results"]:
 response = notion.blocks.children.append(block_id=PAGE_ID, children=blocks)
 print("APPEND RESPONSE BLOCK COUNT:", len(response.get("results", [])))
 print("Dashboard updated successfully")
+ 
+# Persist the historical temperature cache to disk if anything new was
+# added this run, so future runs can skip re-fetching years already
+# validated as complete — this call was previously missing, meaning the
+# cache loaded correctly but was never actually saved back, silently
+# providing no benefit across runs.
+if _temp_cache_dirty:
+    save_temp_cache(_temp_cache)
+    print(f"CACHE: saved {len(_temp_cache)} years to {CACHE_FILE_PATH}")
+else:
+    print("CACHE: no new years added this run, skipping save")
  
 # =========================================================
 # NOTE ON DEPENDENCIES
