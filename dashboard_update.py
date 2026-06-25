@@ -83,6 +83,8 @@ def to_inuvik_time(utc_dt):
 now = datetime.utcnow()
 now_inuvik = to_inuvik_time(now)
  
+print(f"SCRIPT STARTED: {now.isoformat()} UTC")
+ 
  
 # =========================================================
 # HELPERS — Notion block builders (kept tiny to reduce repetition)
@@ -1835,6 +1837,7 @@ def build_temperature_chart():
     return png_bytes, caption
  
  
+print("STARTING: temperature chart (30-year historical prefetch)")
 temp_chart_bytes, temp_chart_caption = build_temperature_chart()
  
  
@@ -1978,6 +1981,7 @@ def build_tdd_histogram(num_years=25):
         return None, "Thawing degree days chart could not be generated — see Action logs."
  
  
+print("STARTING: TDD histogram (25-year historical prefetch)")
 tdd_histogram_bytes, tdd_histogram_caption = build_tdd_histogram()
  
  
@@ -3452,8 +3456,12 @@ def find_latest_sentinel1_date(token, lookback_days=10):
             Standard ray-casting point-in-polygon test against a single
             linear ring (list of [lon, lat] coordinate pairs). No new
             dependency (e.g. shapely) needed for this — it's a compact,
-            well-known algorithm.
+            well-known algorithm. Capped at 1000 vertices as a defensive
+            bound, since this processes externally-controlled API data
+            with no guaranteed upper bound on complexity.
             """
+            if len(ring) > 1000:
+                ring = ring[:1000]
             n = len(ring)
             inside = False
             j = n - 1
@@ -3648,6 +3656,7 @@ sentinel1_caption = "Sentinel-1 SAR image unavailable — credentials missing or
 # already be defined by the time this block actually calls them.
 from concurrent.futures import ThreadPoolExecutor as _TopLevelExecutor
  
+print("STARTING: parallel fetch of MODIS, water level, and Sentinel-1")
 with _TopLevelExecutor(max_workers=3) as _top_level_executor:
     _modis_future = _top_level_executor.submit(fetch_and_process_modis)
     _water_level_future = _top_level_executor.submit(fetch_copernicus_water_level)
@@ -3874,3 +3883,4 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
+ 
