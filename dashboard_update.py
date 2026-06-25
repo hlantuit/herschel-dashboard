@@ -683,11 +683,20 @@ def _icon_wind_arrow(direction_from_deg, speed_kmh):
     img = Image.alpha_composite(img, shadow)
  
     draw = ImageDraw.Draw(img)
-    draw.line([tail, tip], fill=color, width=12)
  
     head_len = 22
     head_angle = math.radians(28)
     back_angle = angle_rad + math.pi
+ 
+    # The shaft stops at the arrowhead's BASE (a point head_len back from
+    # the true tip along the arrow's own axis), not at the tip itself —
+    # otherwise the thick flat-capped shaft end pokes through the
+    # narrower triangle base, looking like two mismatched pieces glued
+    # together rather than one continuous arrow.
+    shaft_end = (tip[0] + head_len * 0.6 * math.sin(back_angle),
+                 tip[1] - head_len * 0.6 * math.cos(back_angle))
+    draw.line([tail, shaft_end], fill=color, width=12)
+ 
     left = (tip[0] + head_len * math.sin(back_angle + head_angle),
             tip[1] - head_len * math.cos(back_angle + head_angle))
     right = (tip[0] + head_len * math.sin(back_angle - head_angle),
@@ -1004,6 +1013,66 @@ def build_mini_forecast_strip(days_data):
         return None
  
  
+def build_large_forecast_strip(days_data):
+    """
+    A larger, more detailed version of build_mini_forecast_strip, sized
+    for the full-width 5-day forecast detail section rather than a
+    half-width card. Notion table cells have no font-size control, which
+    is why the previous emoji-in-table approach couldn't be made bigger
+    no matter how the table itself was sized — rendering real icon
+    images at a larger fixed size sidesteps that limitation entirely.
+ 
+    days_data: list of dicts with 'day_label', 'weathercode', 'temp_min',
+    'temp_max', 'wind_label', 'precip_label' keys.
+    Returns PNG bytes, or None on failure.
+    """
+    try:
+        import io as _io
+ 
+        n = len(days_data)
+        cell_w, cell_h = 170, 230
+        NOTION_BLUE_BG = (231, 243, 248)
+        canvas = Image.new("RGB", (cell_w * n, cell_h), NOTION_BLUE_BG)
+        draw = ImageDraw.Draw(canvas)
+ 
+        try:
+            font_day = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+            font_temp = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            font_detail = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+        except Exception:
+            font_day = font_temp = font_detail = ImageFont.load_default()
+ 
+        icon_size = 110
+ 
+        for i, d in enumerate(days_data):
+            x0 = i * cell_w
+            icon_bytes = render_weather_icon(d["weathercode"])
+            if icon_bytes:
+                icon_img = Image.open(_io.BytesIO(icon_bytes)).convert("RGBA")
+                icon_img = icon_img.resize((icon_size, icon_size), Image.LANCZOS)
+                canvas.paste(icon_img, (x0 + (cell_w - icon_size) // 2, 36), icon_img)
+ 
+            day_label = d["day_label"]
+            day_bbox = draw.textbbox((0, 0), day_label, font=font_day)
+            draw.text((x0 + (cell_w - (day_bbox[2] - day_bbox[0])) // 2, 4), day_label, font=font_day, fill=(50, 50, 50))
+ 
+            temp_label = f"{d['temp_min']:.0f}–{d['temp_max']:.0f}°"
+            temp_bbox = draw.textbbox((0, 0), temp_label, font=font_temp)
+            draw.text((x0 + (cell_w - (temp_bbox[2] - temp_bbox[0])) // 2, 152), temp_label, font=font_temp, fill=(40, 40, 40))
+ 
+            for j, detail_label in enumerate([d.get("wind_label", ""), d.get("precip_label", "")]):
+                detail_bbox = draw.textbbox((0, 0), detail_label, font=font_detail)
+                draw.text((x0 + (cell_w - (detail_bbox[2] - detail_bbox[0])) // 2, 184 + j * 22), detail_label, font=font_detail, fill=(90, 90, 90))
+ 
+        out_buf = _io.BytesIO()
+        canvas.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+ 
+    except Exception as e:
+        print("LARGE FORECAST STRIP RENDER FAILED:", e)
+        return None
+ 
+ 
 def build_wind_forecast_mini_chart(hourly_wind_forecast):
     """
     Builds a compact 48h wind speed forecast chart for the Wind card,
@@ -1118,6 +1187,8 @@ if land_forecast_days:
             "weathercode": d["weathercode"],
             "temp_min": d["temp_min"],
             "temp_max": d["temp_max"],
+            "wind_label": wind_label,
+            "precip_label": f"{d['precip_mm']:.1f} mm" + (f" ({d['precip_prob_pct']:.0f}%)" if d.get("precip_prob_pct") is not None else ""),
         })
     land_forecast_table_block = table(
         header_cells=["", "Day", "Temp", "Wind", "Precip (chance)"],
@@ -1125,10 +1196,12 @@ if land_forecast_days:
     )
     land_forecast_caption = "Source: Open-Meteo"
     mini_forecast_strip_bytes = build_mini_forecast_strip(mini_strip_days)
+    large_forecast_strip_bytes = build_large_forecast_strip(mini_strip_days)
 else:
     land_forecast_table_block = None
     land_forecast_caption = "Land forecast unavailable — fetch failed. Check Action logs."
     mini_forecast_strip_bytes = None
+    large_forecast_strip_bytes = None
  
  
 # =========================================================
@@ -1247,9 +1320,11 @@ if marine_entries:
  
     if issued_line:
         lines.append(issued_line)
-    marine_text = lines + ["Source: Environment Canada (Yukon Coast marine zone)"]
+    marine_text = lines
+    marine_source_text = "Source: Environment Canada (Yukon Coast marine zone)"
 else:
     marine_text = "Marine forecast unavailable — fetch failed. Check Action logs."
+    marine_source_text = ""
  
  
 # =========================================================
@@ -1394,22 +1469,15 @@ if sun_info["status"] == "ok":
  
     if min_elevation_today > 0:
         # Sun never sets: above the horizon at every point in the day.
-        sun_text = [
-            "Sun stays above the horizon all day (midnight sun) at this latitude.",
-            "Source: sunrise-sunset.org, cross-checked against solar position",
-        ]
+        sun_text = "Sun stays above the horizon all day (midnight sun) at this latitude."
     elif max_elevation_today < 0:
         # Sun never rises: below the horizon at every point in the day.
-        sun_text = [
-            "Sun stays below the horizon all day (polar night) at this latitude.",
-            "Source: sunrise-sunset.org, cross-checked against solar position",
-        ]
+        sun_text = "Sun stays below the horizon all day (polar night) at this latitude."
     else:
         sun_text = [
             ("Sunrise: ", sun_info['sunrise'].astimezone(INUVIK_TZ).strftime('%H:%M %Z')),
             ("Sunset: ", sun_info['sunset'].astimezone(INUVIK_TZ).strftime('%H:%M %Z')),
             ("Day length: ", f"{hours}h {minutes}min"),
-            "Source: sunrise-sunset.org",
         ]
 elif sun_info["status"] == "no_data":
     sun_text = f"Sun data unavailable ({sun_info.get('raw_status')}) — may be a polar-day/polar-night edge case the API can't resolve at this latitude."
@@ -2742,7 +2810,6 @@ if tide_points:
         ("Predicted water level (now): ", f"{current_level:.2f} m"),
         ["Next 24h range: ", ("", f"{next_min:.2f} m"), " to ", ("", f"{next_max:.2f} m")],
         "Reference: chart datum, Herschel Island station (06525)",
-        "Source: DFO/CHS Integrated Water Level System (IWLS)",
     ]
 else:
     tide_text = (
@@ -3128,6 +3195,14 @@ if mini_forecast_strip_bytes:
         mini_forecast_strip_block = image_block_from_upload(uid)
     except Exception as e:
         print("MINI FORECAST STRIP NOTION UPLOAD FAILED:", e)
+ 
+large_forecast_strip_block = None
+if large_forecast_strip_bytes:
+    try:
+        uid = upload_image_to_notion(large_forecast_strip_bytes, "large_forecast_strip.png")
+        large_forecast_strip_block = image_block_from_upload(uid)
+    except Exception as e:
+        print("LARGE FORECAST STRIP NOTION UPLOAD FAILED:", e)
  
 wind_forecast_chart_block = None
 if wind_forecast_chart_bytes:
@@ -3605,7 +3680,6 @@ if copernicus_times and copernicus_values:
         ("Total water level (now): ", f"{current_level_total:.2f} m"),
         ["Next 24h range: ", ("", f"{min_level_total:.2f} m"), " to ", ("", f"{max_level_total:.2f} m")],
         "Includes tide + storm surge (not just astronomical tide).",
-        "Source: TOPAZ6 Arctic model (Norwegian Meteorological Institute / Copernicus Marine, ~3km, updated daily)",
     ]
 else:
     water_level_text = (
@@ -3653,9 +3727,10 @@ _total_water_level_blocks.append(
 )
 _total_water_level_blocks.append(divider())
  
-blocks.append(heading("🛰 Satellite — MODIS True Color"))
+blocks.append(heading("🛰 Satellite View of the Island"))
 if modis_block:
     blocks.append(modis_block)
+blocks.append(paragraph(f"A real satellite photo of Herschel Island, taken on {modis_date if modis_date else 'a recent date'}."))
  
 # Link to explore the same date/location/layers interactively in NASA's
 # own Worldview tool, using its documented permalink parameters:
@@ -3667,10 +3742,11 @@ worldview_url = (
     f"&t={worldview_date}"
     f"&v={BBOX_3413}"
 )
-blocks.append(link_paragraph("Explore here →", worldview_url, prefix=f"{modis_caption}  "))
+blocks.append(gray_caption(modis_caption))
+blocks.append(link_paragraph("Explore here →", worldview_url))
 blocks.append(divider())
  
-blocks.append(heading("🛰 Satellite — Sentinel-1 SAR (VV gamma0)"))
+blocks.append(heading("🛰 Radar View of the Island"))
 sentinel1_block = None
 if sentinel1_bytes:
     try:
@@ -3681,10 +3757,13 @@ if sentinel1_bytes:
         sentinel1_caption = "Sentinel-1 image generated but upload to Notion failed — see Action logs."
 if sentinel1_block:
     blocks.append(sentinel1_block)
-blocks.append(paragraph(sentinel1_caption))
-blocks.append(link_paragraph("Explore here →", sentinel1_url, prefix="Browse Sentinel-1 imagery directly on Copernicus Browser.  "))
-blocks.append(divider())
- 
+blocks.append(paragraph(
+    "A radar image of the island, which can see through cloud and darkness — useful when "
+    "the regular satellite photo above is blocked by weather. Gray areas were outside the "
+    "satellite's path that day."
+))
+blocks.append(gray_caption(sentinel1_caption))
+blocks.append(link_paragraph("Explore here →", sentinel1_url))
 blocks.append(divider())
  
 # --- Row 2: weather forecast table (full width) then marine forecast ---
@@ -3693,14 +3772,15 @@ blocks.append(callout(
     "5-day outlook:",
     emoji="📅",
     color="purple_background",
-    children=[land_forecast_table_block] if land_forecast_table_block else None,
+    children=[large_forecast_strip_block] if large_forecast_strip_block else None,
 ))
-blocks.append(paragraph(land_forecast_caption))
+blocks.append(gray_caption(land_forecast_caption))
  
 blocks.append(divider())
  
 blocks.append(heading("⚓ Marine Forecast — Yukon Coast", level=3))
 blocks.append(callout(marine_text, emoji="⚓", color="purple_background"))
+blocks.append(gray_caption(marine_source_text))
  
 blocks.append(divider())
  
@@ -3794,4 +3874,3 @@ else:
 #   netCDF4
 #   notion-client
 #   requests
- 
