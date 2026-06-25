@@ -2895,9 +2895,25 @@ def fetch_copernicus_water_level():
         # central meridian convention as our existing EPSG:3413 pipeline)
         # rather than plain longitude/latitude, so we convert Herschel
         # Island's coordinates the same way already verified for MODIS.
-        target_x, target_y = latlon_to_3413(LAT, LON)
+        target_x_m, target_y_m = latlon_to_3413(LAT, LON)
  
         ds = xr.open_dataset(thredds_url)
+ 
+        # CONFIRMED ROOT CAUSE (after several incorrect prior guesses):
+        # this .ncml file's x/y coordinate variables are NOT in plain
+        # meters — they're in units of 100km (i.e. meters / 100,000).
+        # Verified by cross-checking our own observed coordinate range
+        # (-36 to 38) against an independent, real source: OpenDrift's
+        # own debug log for this exact file reports real coverage of
+        # -3,600,000 to 3,798,000 (meters), and -3,600,000 / 100,000 =
+        # -36.0, 3,798,000 / 100,000 = 37.98 — an exact match. Converting
+        # our target point and search radius into this same native unit
+        # before slicing is the actual fix; everything else (slice
+        # direction, neighborhood search for valid cells) was already
+        # correct and is unaffected by this unit conversion.
+        UNIT_SCALE = 100_000  # meters per native coordinate unit in this file
+        target_x = target_x_m / UNIT_SCALE
+        target_y = target_y_m / UNIT_SCALE
  
         # The TOPAZ6 grid is 3km resolution; near a coastline like
         # Herschel Island's, the single geometrically-nearest cell can
@@ -2906,7 +2922,8 @@ def fetch_copernicus_water_level():
         # grid cells in each direction) and use the nearest cell that
         # actually has valid data, rather than trusting the nearest
         # match blindly.
-        search_radius_m = 50_000  # widened from 15km after repeated "no grid cells found" — hedges against a coastal coverage gap larger than originally assumed, pending live-run diagnostics to confirm the exact cause
+        search_radius_m = 50_000
+        search_radius = search_radius_m / UNIT_SCALE
         x_coords = ds["x"].values
         y_coords = ds["y"].values
         x_ascending = x_coords[0] < x_coords[-1] if len(x_coords) > 1 else True
@@ -2917,19 +2934,20 @@ def fetch_copernicus_water_level():
         # a descending coordinate silently returns an empty selection,
         # which was the actual cause of "no grid cells found" here.
         x_slice = (
-            slice(target_x - search_radius_m, target_x + search_radius_m) if x_ascending
-            else slice(target_x + search_radius_m, target_x - search_radius_m)
+            slice(target_x - search_radius, target_x + search_radius) if x_ascending
+            else slice(target_x + search_radius, target_x - search_radius)
         )
         y_slice = (
-            slice(target_y - search_radius_m, target_y + search_radius_m) if y_ascending
-            else slice(target_y + search_radius_m, target_y - search_radius_m)
+            slice(target_y - search_radius, target_y + search_radius) if y_ascending
+            else slice(target_y + search_radius, target_y - search_radius)
         )
  
         # Diagnostic logging: print the dataset's REAL coordinate ranges
         # alongside what we're requesting, so a failure's actual cause
         # (coordinate mismatch vs. time-range mismatch vs. something else)
         # is visible in the log instead of needing another guess.
-        print(f"COPERNICUS WATER LEVEL DEBUG: target_x={target_x:.0f}, target_y={target_y:.0f}, search_radius={search_radius_m}")
+        print(f"COPERNICUS WATER LEVEL DEBUG: target (meters): x={target_x_m:.0f}, y={target_y_m:.0f}")
+        print(f"COPERNICUS WATER LEVEL DEBUG: target (native 100km units): x={target_x:.3f}, y={target_y:.3f}, search_radius={search_radius:.3f}")
         print(f"COPERNICUS WATER LEVEL DEBUG: dataset x range: {x_coords.min():.0f} to {x_coords.max():.0f} ({'ascending' if x_ascending else 'descending'})")
         print(f"COPERNICUS WATER LEVEL DEBUG: dataset y range: {y_coords.min():.0f} to {y_coords.max():.0f} ({'ascending' if y_ascending else 'descending'})")
         print(f"COPERNICUS WATER LEVEL DEBUG: requested x_slice={x_slice}, y_slice={y_slice}")
