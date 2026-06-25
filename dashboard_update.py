@@ -2669,13 +2669,18 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
         # i.e. the Sentinel-1/radar image, where seeing the true
         # coastline against the SAR backscatter is genuinely useful,
         # unlike MODIS's true-color photo where the coastline is usually
-        # already visible). Uses Natural Earth's public-domain 1:50m
+        # already visible). Uses Natural Earth's public-domain 1:10m
         # scale coastline (a real, verified GeoJSON structure: a
         # FeatureCollection of LineString features, each with its own
         # small bbox), filtered down to just the handful of line
         # segments that actually fall within our small display extent
-        # before projecting/drawing — the full file is small enough
-        # (under ~500KB at this scale) to fetch fresh each run.
+        # before projecting/drawing. The 1:50m scale was tried first
+        # (smaller file, ~445KB) but was confirmed too coarse — that
+        # scale is meant for world/continental maps, where a single
+        # segment can span tens of km, which looked like "only 15-20
+        # blocky segments" at our actual ~300km regional zoom level.
+        # 1:10m (~2.93MB) is the appropriate detail level for this zoom;
+        # still a fast, one-shot fetch for a CI runner.
         try:
             coastline_lon_min = LON - (half_width_m / 111_000) * 1.5
             coastline_lon_max = LON + (half_width_m / 111_000) * 1.5
@@ -2683,7 +2688,7 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
             coastline_lat_max = LAT + (half_width_m / 111_000) * 1.5
  
             coast_resp = requests.get(
-                "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_coastline.geojson",
+                "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_coastline.geojson",
                 timeout=20,
             )
             coast_resp.raise_for_status()
