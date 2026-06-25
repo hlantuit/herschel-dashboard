@@ -2677,10 +2677,10 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
         # before projecting/drawing — the full file is small enough
         # (under ~500KB at this scale) to fetch fresh each run.
         try:
-            coastline_lon_min = lon - (half_width_m / 111_000) * 1.5
-            coastline_lon_max = lon + (half_width_m / 111_000) * 1.5
-            coastline_lat_min = lat - (half_width_m / 111_000) * 1.5
-            coastline_lat_max = lat + (half_width_m / 111_000) * 1.5
+            coastline_lon_min = LON - (half_width_m / 111_000) * 1.5
+            coastline_lon_max = LON + (half_width_m / 111_000) * 1.5
+            coastline_lat_min = LAT - (half_width_m / 111_000) * 1.5
+            coastline_lat_max = LAT + (half_width_m / 111_000) * 1.5
  
             coast_resp = requests.get(
                 "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_coastline.geojson",
@@ -2722,7 +2722,13 @@ def annotate_plain_image(png_bytes, points=None, scale_km=50, half_width_m=150_0
         except Exception as e:
             print("SENTINEL-1 COASTLINE OVERLAY FAILED (continuing without it):", e)
  
- 
+        # --- Scale bar (bottom-left corner) ---
+        px_per_km = 1000 / meters_per_px
+        bar_px = scale_km * px_per_km
+        margin = 30
+        bar_x0 = margin
+        bar_y0 = height_px - margin - 10
+        bar_x1 = bar_x0 + bar_px
  
         draw.line([(bar_x0, bar_y0), (bar_x1, bar_y0)], fill=(255, 255, 255), width=4)
         draw.line([(bar_x0, bar_y0 - 6), (bar_x0, bar_y0 + 6)], fill=(255, 255, 255), width=4)
