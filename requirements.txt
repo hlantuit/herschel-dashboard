@@ -5,4 +5,4 @@ Pillow
 xarray
 netCDF4
 tzdata
- 
+cairosvg
