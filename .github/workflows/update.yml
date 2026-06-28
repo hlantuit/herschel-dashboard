@@ -1,46 +1,38 @@
 
 name: Update Herschel Dashboard
+
 on:
-  workflow_dispatch:        # keep this if you already have it — lets you trigger manually
   schedule:
-    - cron: '0 * * * *'     # runs at the top of every hour, UTC
- 
+    - cron: "0 * * * *"   # every hour
+  workflow_dispatch: {}    # allows manual "Run workflow" button
+
 permissions:
-  contents: write           # needed so the workflow can commit the historical data cache back to the repo
- 
+  contents: write
+
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
     steps:
-      # -------------------------
-      # 1. Checkout repository
-      # -------------------------
-      - name: Checkout repository
+      - name: Checkout this site's repo
         uses: actions/checkout@v4
-      # -------------------------
-      # 2. Setup Python
-      # -------------------------
+
+      - name: Checkout shared dashboard-lib
+        uses: actions/checkout@v4
+        with:
+          repository: hlantuit/dashboard-lib
+          path: dashboard-lib
+          token: ${{ secrets.DASHBOARD_LIB_PAT }}
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # -------------------------
-      # 3. Install dependencies
-      # -------------------------
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      # -------------------------
-      # 4. Run dashboard script
-      # -------------------------
-      # PYTHONUNBUFFERED=1 (and the -u flag) force Python's stdout/stderr
-      # to flush immediately rather than block-buffering — a real, known
-      # GitHub Actions issue where print() output can be invisible in the
-      # log for the entire run, then all appear at once at the very end
-      # (or not at all, if the run is cancelled before that final flush).
-      # This may fully explain apparent "silent hangs" that were actually
-      # a script running and printing normally the whole time.
+
       - name: Run dashboard update
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -51,20 +43,11 @@ jobs:
           SENTINEL_HUB_CLIENT_SECRET: ${{ secrets.SENTINEL_HUB_CLIENT_SECRET }}
           PYTHONUNBUFFERED: "1"
         run: python -u dashboard_update.py
-      # -------------------------
-      # 5. Commit the historical data cache back to the repo, if it changed
-      # -------------------------
-      # The script caches completed past years of weather data
-      # (cache/daily_temps_cache.json) so future runs don't need to
-      # re-fetch them from Open-Meteo every hour. This step persists any
-      # newly-cached years back to the repository. It's safe to run every
-      # time: if nothing changed (e.g. all years were already cached),
-      # the "git diff" check below skips the commit instead of failing.
+
       - name: Commit updated cache
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add cache/daily_temps_cache.json
-          git diff --staged --quiet || git commit -m "Update historical data cache"
+          git add cache/
+          git diff --staged --quiet || git commit -m "Update temperature cache [skip ci]"
           git push
- 
