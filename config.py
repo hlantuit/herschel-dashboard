@@ -34,7 +34,7 @@ UTM_EPSG = "32607"
 UTM_CENTER_X, UTM_CENTER_Y = lib.latlon_to_utm(LAT, LON, zone=UTM_ZONE)
 
 MAP_POINTS = [
-    (LAT, LON, SITE_DISPLAY_NAME, -28),
+    (69.568861, -138.911754, SITE_DISPLAY_NAME, -28),
     (68.933333, -137.2, "Shingle Point", -10),
     (68.226653, -135.003294, "Aklavik", -10),
     (68.360741, -133.723022, "Inuvik", -10, -90),
