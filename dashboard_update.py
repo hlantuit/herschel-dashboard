@@ -41,7 +41,7 @@ temp_cache_dirty = False
 # =========================================================
 # FETCH — GEM/GDPS forecast (primary), Open-Meteo as fallback
 # =========================================================
-gem_forecast = lib.fetch_gem_forecast(config.LAT, config.LON, now_utc)
+gem_forecast = lib.fetch_gem_forecast(config.LAT, config.LON, now_utc, tz_name=config.TZ_NAME)
 if gem_forecast:
     print(f"GEM FORECAST: using source={gem_forecast['source']}")
 else:
@@ -152,7 +152,7 @@ if land_forecast_days:
             print("MINI FORECAST STRIP NOTION UPLOAD FAILED:", e)
 
 # Wind forecast mini chart: prefer GEM hourly, fall back to Open-Meteo
-gem_wind_hourly = lib.gem_hourly_wind_forecast(gem_forecast["hourly"], now_utc) if gem_forecast else None
+gem_wind_hourly = lib.gem_hourly_wind_forecast(gem_forecast["hourly"], now_utc, tz_name=config.TZ_NAME) if gem_forecast else None
 wind_forecast_source = gem_forecast["hourly"] if gem_forecast else (weather.get("hourly_wind_forecast") if weather["status"] == "ok" else None)
 wind_forecast_chart_bytes, wind_forecast_chart_caption = lib.build_wind_forecast_mini_chart(
     gem_wind_hourly if gem_wind_hourly else (weather.get("hourly_wind_forecast") if weather["status"] == "ok" else None)
@@ -302,7 +302,7 @@ blocks += lib.build_todays_conditions_section(
     sun_text, sun_chart_bytes, sun_chart_caption,
 )
 blocks += lib.build_active_alerts_section(active_alerts)
-blocks += lib.build_gem_forecast_section(gem_forecast, config.TZ_NAME)
+blocks += lib.build_gem_forecast_section(gem_forecast, config.TZ_NAME, now_utc=now_utc)
 blocks += lib.build_marine_forecast_section(marine_text, marine_source_text, config.MARINE_ZONE_NAME, config.MARINE_ZONE_ID)
 blocks += lib.build_total_water_level_section(water_level_text, water_level_chart_bytes, water_level_chart_caption)
 for station, h_times, h_values in hydrometric_results:
