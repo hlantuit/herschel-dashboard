@@ -59,7 +59,7 @@ WATER_LEVEL_YEARLY_MEAN = -0.2668  # re-verify independently for this site if it
 # doesn't appear on this site's page.
 HYDROMETRIC_STATIONS = []
 
-LOGO_URL = "https://www.awi.de/_assets/978631966794c5093250775de182779d/Images/AWI/awi_logo.svg"
+LOGO_URL = None
 INSTITUTION_TEXT = (
     "This dashboard is provided by the Alfred Wegener Institute Helmholtz Centre "
     "for Polar and Marine Research."
