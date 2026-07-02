@@ -220,8 +220,9 @@ tide_chart_bytes, tide_chart_caption = lib.build_tide_chart(tide_points, now_utc
 # =========================================================
 from concurrent.futures import ThreadPoolExecutor
 
-print("STARTING: parallel fetch of MODIS, water level, Sentinel-1, and hydrometric stations")
-with ThreadPoolExecutor(max_workers=3 + len(config.HYDROMETRIC_STATIONS)) as executor:
+print("STARTING: parallel fetch of MODIS, water level, Sentinel-1, wave forecast, and hydrometric stations")
+with ThreadPoolExecutor(max_workers=4 + len(config.HYDROMETRIC_STATIONS)) as executor:
+    wave_future = executor.submit(lib.fetch_wave_forecast, config.LAT, config.LON, now_utc)
     modis_future = executor.submit(
         lib.fetch_and_process_modis,
         bbox_3413=config.MODIS_BBOX_3413, center_x=config.MODIS_CENTER_X, center_y=config.MODIS_CENTER_Y,
@@ -246,6 +247,12 @@ with ThreadPoolExecutor(max_workers=3 + len(config.HYDROMETRIC_STATIONS)) as exe
         (station, executor.submit(lib.fetch_hydrometric_water_level, station["station_id"], station["provterr"]))
         for station in config.HYDROMETRIC_STATIONS
     ]
+
+    try:
+        wave_data = wave_future.result()
+    except Exception as e:
+        print("WAVE FORECAST PARALLEL FETCH FAILED:", e)
+        wave_data = None
 
     try:
         modis_bytes, modis_date = modis_future.result()
@@ -304,6 +311,7 @@ blocks += lib.build_todays_conditions_section(
 blocks += lib.build_active_alerts_section(active_alerts)
 blocks += lib.build_gem_forecast_section(gem_forecast, config.TZ_NAME, now_utc=now_utc)
 blocks += lib.build_marine_forecast_section(marine_text, marine_source_text, config.MARINE_ZONE_NAME, config.MARINE_ZONE_ID)
+blocks += lib.build_wave_forecast_section(wave_data)
 blocks += lib.build_total_water_level_section(water_level_text, water_level_chart_bytes, water_level_chart_caption)
 for station, h_times, h_values in hydrometric_results:
     h_chart_bytes, h_chart_caption = lib.build_hydrometric_chart(h_times, h_values, station["station_id"], station["river_name"])
