@@ -322,7 +322,10 @@ blocks += lib.build_sentinel1_section(sentinel1_bytes, sentinel1_caption, sentin
 blocks += lib.build_temperature_chart_section(temp_chart_bytes, temp_chart_caption)
 blocks += lib.build_tdd_histogram_section(tdd_histogram_bytes, tdd_histogram_caption)
 blocks += lib.build_wind_chart_section(wind_chart_bytes, wind_chart_caption, rose_bytes=wind_rose_bytes)
-blocks += lib.build_disclaimer_section()
+blocks += lib.build_disclaimer_section([
+    "gem", "open_meteo", "modis", "sentinel1",
+    "tides", "marine", "alerts", "waves", "cmems",
+])
 
 lib.publish_blocks_to_notion(blocks)
 
